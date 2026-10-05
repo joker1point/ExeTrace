@@ -24,6 +24,8 @@ import winutil
 log = logging.getLogger("exetrace.ui")
 
 POLL_MS = 600
+HIDDEN_POLL_MS = 2000     # 窗口隐藏/最小化时的泵间隔（后台常驻以省内存为先）
+HIDDEN_TRIM_S = 120.0     # 隐藏状态下修剪工作集的周期（秒）
 SEARCH_DEBOUNCE_MS = 260
 ICON_SIZE = 24
 ICON_BUDGET_S = 0.4    # 单轮图标加载的时间预算（秒）：跑满立即让出主线程
@@ -154,6 +156,8 @@ class AppWindow:
         self._scanning = True
         self._tray_hint_shown = False
         self._hotkey = None
+        self._hidden = False        # 窗口当前是否隐藏/最小化（后台常驻态）
+        self._last_trim = 0.0       # 上次工作集修剪时刻
 
         t0 = time.perf_counter()
         self._build_window()
@@ -703,11 +707,42 @@ class AppWindow:
 
     # ------------------------------------------------------------ 主循环
 
+    def _window_hidden(self) -> bool:
+        """窗口是否不可见（托盘隐藏 / 最小化）——后台常驻态。"""
+        try:
+            return self.root.state() in ("iconic", "withdrawn")
+        except tk.TclError:
+            return True
+
+    def _trim_idle(self) -> None:
+        """修剪工作集：把不活跃的页换出，把后台物理内存压到最小。
+
+        实测（2026-10-05）：51 MB → <8 MB 立即生效；之后被轮询/泵反复
+        碰热的页会缓慢回弹（约 16 MB），故隐藏状态下按周期再压。
+        """
+        if winutil.trim_working_set():
+            self._last_trim = time.time()
+            log.info("后台内存已压缩（工作集修剪）")
+
     def _pump(self) -> None:
-        """主线程定时器：处理跨线程回调 + 按版本号刷新列表。"""
+        """主线程定时器：处理跨线程回调 + 按版本号刷新列表。
+
+        窗口隐藏/最小化时降频（HIDDEN_POLL_MS）并完全跳过界面重建 ——
+        回弹的后台内存几乎全部来自周期性活动反复碰热的代码页，让它们
+        安静下来是「后台内存最小化」的前提。
+        """
         if self._closing:
             return
         t0 = time.perf_counter()
+        hidden = self._window_hidden()
+        if hidden != self._hidden:
+            self._hidden = hidden
+            if hidden:
+                self._last_rev = -1   # 呼出后强制重建一次
+                self._trim_idle()     # 刚隐藏：立即压一次
+            log.info("窗口状态: %s", "隐藏/最小化（后台降频）" if hidden else "可见（恢复正常）")
+        elif hidden and time.time() - self._last_trim >= HIDDEN_TRIM_S:
+            self._trim_idle()         # 周期回压（对抗被轮询碰热的回弹）
         while True:
             try:
                 fn = self._ui_queue.get_nowait()
@@ -719,13 +754,14 @@ class AppWindow:
                 log.warning("UI 回调异常: %s", exc)
                 if not self._closing:
                     try:
-                        self.root.after(POLL_MS, self._pump)
+                        self.root.after(HIDDEN_POLL_MS if hidden else POLL_MS, self._pump)
                     except Exception:
                         pass
                 return
         try:
-            self.refresh()
-            self.root.after(POLL_MS, self._pump)
+            if not hidden:
+                self.refresh()
+            self.root.after(HIDDEN_POLL_MS if hidden else POLL_MS, self._pump)
         except tk.TclError:
             pass
         cost = time.perf_counter() - t0

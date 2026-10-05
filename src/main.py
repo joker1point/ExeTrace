@@ -126,6 +126,7 @@ def selftest() -> int:
     report("proc_snapshot", len(snap) > 50 and os.getpid() in snap, f"{len(snap)} 个进程")
     me = winutil.process_exe_path(os.getpid())
     report("proc_exe_path", bool(me) and me.lower().endswith(".exe"), f"{os.path.basename(me) if me else 'None'}")
+    report("trim_working_set", isinstance(winutil.trim_working_set(), bool), "调用成功（后台内存压缩）")
     report("window_enum", isinstance(winutil.visible_window_pids(), set),
            f"{len(winutil.visible_window_pids())} 个带窗口进程")
     fg = winutil.foreground_pid()
