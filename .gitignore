@@ -1,0 +1,10 @@
+.venv-build/
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+assets/app.ico
+
+# Rust 版（exetrace-rs/）构建产物
+exetrace-rs/target/

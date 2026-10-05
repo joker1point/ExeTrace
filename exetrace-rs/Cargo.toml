@@ -1,0 +1,28 @@
+[package]
+name = "exetrace"
+version = "1.0.0"
+edition = "2021"
+description = "ExeTrace — 应用历史定位器（Rust/egui 版）"
+
+# 依赖由 cargo add 管理（版本以解析结果为准），此处只放构建配置。
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts"] }
+egui_extras = "0.36.2"
+log = "0.4.34"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_System_Com"] }
+winreg = "0.56.0"
+
+[profile.release]
+# 体积与编译内存的折中：fat LTO + codegen-units=1 在本机会被内存守护杀掉
+# （rustc 被强制终止、无编译错误），thin LTO + 4 个 codegen 单元更稳。
+opt-level = "z"
+lto = "thin"
+codegen-units = 4
+strip = true
+
+# vello_cpu（egui 0.36 的 CPU 光栅化器）在 opt-level=z + LTO 下编译会被
+# 系统终止（本机可用内存紧张），单独降级即可稳定通过；体积影响很小。
+[profile.release.package.vello_cpu]
+opt-level = 1
