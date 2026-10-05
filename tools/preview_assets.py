@@ -19,9 +19,9 @@ SHOTS = [
     ("title_card.mp4", 1.0),
     ("title_card.mp4", 3.5),
     ("mem_chart.mp4", 2.5),
-    ("mem_chart.mp4", 6.0),
-    ("mem_chart.mp4", 9.5),
-    ("mem_chart.mp4", 13.2),
+    ("mem_chart.mp4", 5.0),
+    ("mem_chart.mp4", 7.5),
+    ("mem_chart.mp4", 11.5),
     ("end_card.mp4", 1.6),
     ("end_card.mp4", 5.6),
 ]
@@ -34,6 +34,7 @@ label_f = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 22)
 
 for i, (name, tsec) in enumerate(SHOTS):
     tmp = Path(tempfile.gettempdir()) / f"pv_{i}.png"
+    tmp.unlink(missing_ok=True)  # 防上一次的残留帧被当成本次结果（-ss 超时 ffmpeg 会静默无输出）
     subprocess.run(
         [FF, "-y", "-hide_banner", "-loglevel", "error", "-ss", str(tsec),
          "-i", str(VA / name), "-frames:v", "1", str(tmp)],

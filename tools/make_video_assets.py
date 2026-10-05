@@ -151,18 +151,18 @@ def gen_title_card() -> None:
 # --------------------------------------------------------------------- 内存对比
 
 
+# 参照均为本机实测的常驻工具（对等比较；不列举非同类的国民级应用）
 ROWS = [
-    ("微信", 226.0, GRAY_BAR, False),
     ("OneDrive", 15.6, GRAY_BAR, False),
     ("QuickClipboard", 13.1, GRAY_BAR, False),
-    ("Everything", 0.5, GRAY_BAR, False),
     ("ExeTrace", 5.8, BAR_HI, True),
+    ("Everything", 0.5, GRAY_BAR, False),
 ]
 
 
 def gen_mem_chart() -> None:
     name = "mem_chart"
-    dur = 14.0
+    dur = 12.0
     d_frame = FRAMES / name
     d_frame.mkdir(parents=True, exist_ok=True)
 
@@ -174,15 +174,16 @@ def gen_mem_chart() -> None:
 
     x_name_r = 470          # 名称右对齐位置
     x_bar = 520             # 条形起点
-    max_w = 960             # 最大条宽（对应 sqrt(226)）
-    row_h = 92
-    top = 330
+    max_w = 960             # 满宽对应 15.6 MB（线性刻度）
+    base_mb = 15.6
+    row_h = 104
+    top = 350
 
     # 数据延迟与时长
-    starts = [2.0, 2.9, 3.8, 4.7, 6.2]
+    starts = [2.0, 2.8, 3.6, 5.2]
     grow = 1.0
-    hi_t = 8.6              # ExeTrace 高亮开始
-    note_t = 12.0
+    hi_t = 5.8              # ExeTrace 高亮开始
+    note_t = 10.5
 
     n = int(dur * FPS)
     for i in range(n):
@@ -211,14 +212,14 @@ def gen_mem_chart() -> None:
             if t < st:
                 continue
             prog = ease_out((t - st) / grow)
-            norm = math.sqrt(val) / math.sqrt(226.0)
+            norm = min(1.0, val / base_mb)
             w_now = int(max_w * norm * prog)
             y = top + idx * row_h
             # 名称
             col = GREEN if (hi and t > hi_t) else FG
             d.text((x_name_r, y + 26), label, font=f_name, fill=col, anchor="rm")
             # 条形底槽
-            norm_full = math.sqrt(val) / math.sqrt(226.0)
+            norm_full = min(1.0, val / base_mb)
             w_full = int(max_w * norm_full)
             d.rounded_rectangle([x_bar, y + 8, x_bar + w_full, y + 44],
                                 radius=8, fill=(28, 33, 45))
@@ -252,8 +253,8 @@ def gen_mem_chart() -> None:
             if a > 0.02:
                 sub = Image.new("RGBA", (W, H), (0, 0, 0, 0))
                 ds = ImageDraw.Draw(sub)
-                ds.text((x_bar, top + 5 * row_h - 40),
-                        "后台 5–8 MB：手机 App 级的常驻开销",
+                ds.text((x_bar, top + 4 * row_h - 44),
+                        "后台 5–8 MB · 常驻友好",
                         font=font(36), fill=GREEN)
                 sub.putalpha(sub.getchannel("A").point(lambda v: int(v * a)))
                 layer = Image.alpha_composite(layer, sub)
