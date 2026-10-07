@@ -17,6 +17,7 @@ import time
 import tkinter as tk
 
 import paths
+import resolver
 import scanner
 import shortcut
 import ui
@@ -173,6 +174,32 @@ def selftest() -> int:
         second = shortcut.unique_lnk_path(td, "same")
         report("shortcut_unique", second != first, os.path.basename(second))
 
+        # v3.1：任意路径解析（并入自 DeskPin 的文件夹识别能力）
+        if samples:
+            r_exe = resolver.resolve(samples[0])
+            report(
+                "resolver_exe",
+                r_exe.ok and r_exe.kind == "exe" and os.path.normcase(r_exe.target or "") == os.path.normcase(samples[0]),
+                os.path.basename(samples[0]),
+            )
+        fake = os.path.join(td, "MyTool")
+        os.makedirs(fake, exist_ok=True)
+        for fn, size in (("MyTool.exe", 9000), ("helper.exe", 500), ("setup.exe", 400)):
+            with open(os.path.join(fake, fn), "wb") as fh:
+                fh.write(b"MZ" + b"\0" * size)
+        r_dir = resolver.resolve(fake)
+        report(
+            "resolver_folder_rank",
+            r_dir.ok and os.path.basename(r_dir.target or "") == "MyTool.exe",
+            f"target={os.path.basename(r_dir.target or '-')} 候选 {len(r_dir.candidates)} 个",
+        )
+        report("resolver_default_name", r_dir.default_name == "MyTool", f"name={r_dir.default_name!r}")
+        report(
+            "resolver_missing",
+            resolver.resolve(os.path.join(td, "no-such-path")).ok is False,
+            "不存在的路径被拒绝",
+        )
+
     lines.append("SELFTEST " + ("OK" if ok else "FAILED"))
     try:
         (paths.data_dir() / "selftest.txt").write_text("\n".join(lines), encoding="utf-8")
@@ -191,25 +218,36 @@ def _ensure_streams() -> None:
 
 
 def create_from_cli(raw_path: str, name: str | None = None) -> int:
-    """命令行直接创建桌面快捷方式（脚本 / 批量场景）。退出码：0 成功且已校验。"""
+    """命令行直接创建桌面快捷方式（脚本 / 批量场景）。退出码：0 成功且已校验。
+
+    支持 exe 或软件文件夹：文件夹走 resolver 智能识别主程序（并入自 DeskPin）。
+    """
     setup_logging()
     if not shortcut.com_initialize():
         print("error: COM init failed")
         return 2
-    target = os.path.abspath(raw_path)
-    if not os.path.isfile(target):
-        print(f"error: 目标不存在或不是文件: {target}")
+    res = resolver.resolve(raw_path)
+    if not res.ok or not res.target:
+        print(f"error: {res.message}")
         return 3
+    target = res.target
+    if res.kind == "folder":
+        extra = f"（{len(res.candidates)} 个候选，取主程序）" if len(res.candidates) > 1 else ""
+        print(f"resolved: {target} {extra}".rstrip())
     try:
         desktop = shortcut.desktop_dir()
         os.makedirs(desktop, exist_ok=True)
-        base = shortcut.sanitize_name(name or "") or shortcut.default_shortcut_name(target)
+        base = (
+            shortcut.sanitize_name(name or "")
+            or shortcut.sanitize_name(res.default_name)
+            or shortcut.default_shortcut_name(target)
+        )
         lnk_path = shortcut.unique_lnk_path(desktop, base)
         shortcut.create_shortcut(
             lnk_path,
             target,
-            workdir=os.path.dirname(target),
-            icon=target,
+            workdir=res.workdir or os.path.dirname(target),
+            icon=res.icon_source or target,
             description=os.path.basename(target),
         )
     except OSError as exc:

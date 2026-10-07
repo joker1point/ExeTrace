@@ -17,7 +17,7 @@ from pathlib import Path
 
 APP_NAME = "ExeTrace"
 APP_TITLE = "ExeTrace — 应用历史定位器"
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.1.0"
 
 _ENV_OVERRIDE = "EXETRACE_DATA_DIR"
 

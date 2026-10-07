@@ -15,9 +15,10 @@ import queue
 import time
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import paths
+import resolver
 import shortcut
 import winutil
 
@@ -307,6 +308,7 @@ class AppWindow:
         self.menu = tk.Menu(r, tearoff=0, font=(f, 9))
         self.menu.add_command(label="启动", command=self._launch_selected)
         self.menu.add_command(label="创建桌面快捷方式", command=self._create_shortcut)
+        self.menu.add_command(label="钉任意程序到桌面…", command=self._pin_any_path)
         self.menu.add_command(label="打开所在文件夹", command=self._reveal_selected)
         self.menu.add_separator()
         self.menu.add_command(label="复制完整路径", command=self._copy_path)
@@ -338,6 +340,10 @@ class AppWindow:
 
         self.btn_prune = ttk.Button(footer, text="清理失效记录", command=self._prune_missing)
         self.btn_prune.grid(row=0, column=4, padx=(16, 8))
+
+        # 「钉任意程序…」：不依赖历史记录与选中项，随时可用（能力并入自 DeskPin）
+        self.btn_pin_any = ttk.Button(footer, text="钉任意程序…", command=self._pin_any_path)
+        self.btn_pin_any.grid(row=0, column=5, sticky="w", padx=(16, 8))
 
         self.pause_var = tk.BooleanVar(value=False)
         self.pause_cb = ttk.Checkbutton(
@@ -674,6 +680,7 @@ class AppWindow:
         "说明\n"
         "  · 后台自动记录你打开的每个应用；关窗后仍在托盘记录（可暂停）\n"
         "  · 「桌面」列 ✔ 表示已为该应用创建过桌面快捷方式\n"
+        "  · 「钉任意程序…」可从任意 exe / 软件文件夹创建快捷方式（文件夹自动识别主程序，多个候选可下拉切换）\n"
         "  · 「忽略此应用」后它不会再被记录；想恢复就删掉 config.json 里对应条目"
     )
 
@@ -871,6 +878,155 @@ class AppWindow:
         self.refresh(force=True)
         suffix = "（已校验）" if verified else ""
         self._set_event(f"已创建桌面快捷方式：{os.path.basename(lnk_path)}{suffix}")
+
+    def _pin_any_path(self) -> None:
+        """钉任意 exe / 软件文件夹到桌面（不依赖历史记录；能力并入自 DeskPin）。
+
+        流程：输入或选择路径 → resolver 识别（文件夹自动找主程序，多候选可下拉切换）
+        → 创建并读回校验。
+        """
+        shortcut.com_initialize()
+        dlg = tk.Toplevel(self.root)
+        dlg.title("钉任意程序到桌面")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+
+        body = ttk.Frame(dlg, padding=(14, 12, 14, 10))
+        body.grid(row=0, column=0, sticky="ew")
+
+        ttk.Label(body, text="exe 或软件文件夹路径").grid(row=0, column=0, columnspan=3, sticky="w")
+        path_var = tk.StringVar()
+        entry = ttk.Entry(body, textvariable=path_var, width=56)
+        entry.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(3, 2))
+
+        status_var = tk.StringVar(value="输入路径，或点下方按钮选择 exe / 软件文件夹")
+        ttk.Label(body, textvariable=status_var, style="Hint.TLabel", wraplength=430).grid(
+            row=2, column=0, columnspan=3, sticky="w"
+        )
+
+        pick_row = ttk.Frame(body)
+        pick_row.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 2))
+
+        cand_row = ttk.Frame(body)
+        cand_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        cand_label = ttk.Label(cand_row, text="候选主程序")
+        cand_box = ttk.Combobox(cand_row, state="readonly", width=46)
+        cand_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        cand_box.grid(row=0, column=1, sticky="ew")
+        cand_label.grid_remove()
+        cand_box.grid_remove()
+
+        name_row = ttk.Frame(body)
+        name_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Label(name_row, text="快捷方式名称").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        name_var = tk.StringVar()
+        ttk.Entry(name_row, textvariable=name_var, width=34).grid(row=0, column=1, sticky="ew")
+
+        state: dict = {"res": None}
+
+        def show_state(res) -> None:
+            state["res"] = res if (res and res.ok) else None
+            status_var.set(res.message if res else "")
+            if res and res.ok and res.kind == "folder" and len(res.candidates) > 1:
+                cand_box["values"] = [f"{os.path.basename(c.exe)} — {c.exe}" for c in res.candidates]
+                cand_box.current(0)
+                cand_label.grid()
+                cand_box.grid()
+            else:
+                cand_label.grid_remove()
+                cand_box.grid_remove()
+            if res and res.ok:
+                name_var.set(res.default_name)
+            create_btn.configure(state="normal" if (res and res.ok) else "disabled")
+
+        def re_resolve(_event=None) -> None:
+            show_state(resolver.resolve(path_var.get()))
+
+        def pick_file() -> None:
+            p = filedialog.askopenfilename(
+                parent=dlg, title="选择程序",
+                filetypes=[("可执行文件", "*.exe"), ("所有文件", "*.*")],
+            )
+            if p:
+                path_var.set(p)
+                re_resolve()
+
+        def pick_dir() -> None:
+            p = filedialog.askdirectory(parent=dlg, title="选择软件文件夹")
+            if p:
+                path_var.set(p)
+                re_resolve()
+
+        def on_cand_change(_event=None) -> None:
+            res = state["res"]
+            if not res:
+                return
+            i = cand_box.current()
+            if 0 <= i < len(res.candidates):
+                c = res.candidates[i]
+                state["res"] = resolver.Resolution(
+                    ok=True, message=res.message, source=res.source, kind="folder",
+                    target=c.exe, workdir=os.path.dirname(c.exe), icon_source=c.exe,
+                    default_name=res.default_name, candidates=res.candidates,
+                )
+                status_var.set(f"已选候选：{os.path.basename(c.exe)}")
+
+        def create() -> None:
+            res = state["res"]
+            if not res or not res.target:
+                return
+            base = shortcut.sanitize_name(name_var.get()) or shortcut.sanitize_name(res.default_name)
+            if not base:
+                messagebox.showwarning("ExeTrace", "请输入快捷方式名称。", parent=dlg)
+                return
+            try:
+                desktop = shortcut.desktop_dir()
+                os.makedirs(desktop, exist_ok=True)
+                lnk_path = shortcut.unique_lnk_path(desktop, base)
+                shortcut.create_shortcut(
+                    lnk_path,
+                    res.target,
+                    workdir=res.workdir or os.path.dirname(res.target),
+                    icon=res.icon_source or res.target,
+                    description=os.path.basename(res.target),
+                )
+                info = shortcut.read_shortcut(lnk_path)
+                verified = os.path.normcase(info.get("target", "")) == os.path.normcase(res.target)
+            except OSError as exc:
+                log.exception("钉任意程序失败")
+                messagebox.showerror("ExeTrace", f"创建桌面快捷方式失败：\n{exc}", parent=dlg)
+                return
+            self.store.mark_pinned(res.target)  # 仅在历史库中存在该路径时置标记；否则无副作用
+            self.refresh(force=True)
+            suffix = "（已校验）" if verified else ""
+            self._set_event(f"已创建桌面快捷方式：{os.path.basename(lnk_path)}{suffix}")
+            dlg.destroy()
+
+        ttk.Button(pick_row, text="选择 exe…", command=pick_file).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(pick_row, text="选择文件夹…", command=pick_dir).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(pick_row, text="识别", command=re_resolve).grid(row=0, column=2)
+
+        cand_box.bind("<<ComboboxSelected>>", on_cand_change)
+
+        btns = ttk.Frame(body)
+        btns.grid(row=6, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        create_btn = ttk.Button(btns, text="创建桌面快捷方式", command=create, state="disabled")
+        create_btn.grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(btns, text="取消", command=dlg.destroy).grid(row=0, column=1)
+
+        entry.bind("<Return>", re_resolve)
+        entry.focus_set()
+
+        dlg.update_idletasks()
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+            dlg.geometry(f"+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
+        except tk.TclError:
+            pass
+        dlg.grab_set()
+        dlg.wait_window()
 
     def _remove_selected(self) -> None:
         path = self._require_selection()
