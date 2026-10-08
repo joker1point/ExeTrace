@@ -2,6 +2,8 @@
 
 **[⬇ 下载最新版](https://github.com/joker1point/ExeTrace/releases/latest)**（Windows 单文件 exe，双击即用，无需安装）
 
+**▶ [功能演示：6 张真机操作动图（搜索 / 右键菜单 / 一键钉桌面 / 启动 / 托盘热键 / 帮助）](exetrace-native/docs/feature-demo.md)**
+
 > 越来越多人能用 AI 快速做出一个小众、个性化的桌面软件，但作者往往没有编程背景：
 > 不做桌面快捷方式，也不引导用户创建。用户用完、关掉界面，就再也找不到刚才那个软件在哪了。
 > **ExeTrace 就是为了解决这件事**：后台记录你打开过的每一个应用，随时一键找回。
@@ -51,7 +53,8 @@
 
 | 版本 | 位置 | exe 体积 | 特点 |
 |---|---|---|---|
-| **Python / tkinter（主力）** | 根目录 | 20.4 MB | 功能最全（搜索排序 / 图标 / 托盘 / 一键钉桌面 / 分类 / 使用时长）；常态 CPU ≈ 2%（单核），**后台/最小化内存 5-8 MB** |
+| **Python / tkinter（release 版）** | 根目录 | 20.4 MB | 功能最全（搜索排序 / 图标 / 托盘 / 一键钉桌面 / 分类 / 使用时长）；常态 CPU ≈ 2%（单核），**后台/最小化内存 5-8 MB** |
+| **Rust / Win32 原生（新，推荐自构建）** | `exetrace-native/` | **1.61 MB** | 系统原生控件、不含任何 UI 框架：**托盘常驻约 2 MB**、窗口打开约 58 MB；功能对齐 v3.1。**[功能演示（6 张真机动图）](exetrace-native/docs/feature-demo.md)** |
 | Rust / egui（实验） | `exetrace-rs/` | 6.8 MB | 冷启动快、体积小；内存偏高（约 120 MB，为 egui 框架基线） |
 
 两个版本共用同一 SQLite 库（`%LOCALAPPDATA%\ExeTrace\history.db`，schema 一致），数据互通；不建议同时常驻（会双重记录）。
