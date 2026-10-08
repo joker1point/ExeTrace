@@ -1,0 +1,5 @@
+# 本项目固定使用 GNU 工具链：
+# 本机没有 MSVC，而 build script / proc-macro 必须以 host 工具链编译，
+# 只有 host 也是 gnu 时整条链路才不依赖 link.exe。
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"

@@ -91,6 +91,9 @@ def gen_title_card() -> None:
     name = "title_card"
     dur = 4.0
     d_frame = FRAMES / name
+    if d_frame.exists():
+        # 防旧帧残留被 ffmpeg 连续读取（2026-10-06 事故：旧版后 60 帧被接在新版后）
+        shutil.rmtree(d_frame, ignore_errors=True)
     d_frame.mkdir(parents=True, exist_ok=True)
 
     f_main = font(104)
@@ -164,6 +167,9 @@ def gen_mem_chart() -> None:
     name = "mem_chart"
     dur = 12.0
     d_frame = FRAMES / name
+    if d_frame.exists():
+        # 防旧帧残留被 ffmpeg 连续读取（2026-10-06 事故：旧版后 60 帧被接在新版后）
+        shutil.rmtree(d_frame, ignore_errors=True)
     d_frame.mkdir(parents=True, exist_ok=True)
 
     f_title = font(56)
@@ -294,6 +300,9 @@ def gen_end_card() -> None:
     name = "end_card"
     dur = 8.0
     d_frame = FRAMES / name
+    if d_frame.exists():
+        # 防旧帧残留被 ffmpeg 连续读取（2026-10-06 事故：旧版后 60 帧被接在新版后）
+        shutil.rmtree(d_frame, ignore_errors=True)
     d_frame.mkdir(parents=True, exist_ok=True)
 
     icon_path = ROOT / "assets" / "preview.png"

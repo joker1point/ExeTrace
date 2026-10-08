@@ -1,0 +1,18 @@
+# 用 GNU 工具链编译（本机无 MSVC / Windows SDK；TDM-GCC 是安装残留）。
+# 工具链位置：用户目录下的 WinLibs mingw-w64（不写系统目录、不改全局 PATH）。
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = 'C:\Users\biren\mingw64\bin\gcc.exe'
+ar = 'C:\Users\biren\mingw64\bin\ar.exe'
+
+# crates.io 走国内镜像（本机 GitHub 直连受限，实测 gh-proxy 加速可行）
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true

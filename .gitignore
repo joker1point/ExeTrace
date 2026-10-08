@@ -11,3 +11,7 @@ exetrace-rs/target/
 
 # 宣传视频素材（本地工作区，体积大不入库；生成器见 tools/make_video_assets.py）
 video_assets/
+
+# Rust 原生版（exetrace-native/）：构建缓存与录制中间产物
+exetrace-native/target/
+exetrace-native/assets/demo/raw/_frames_*/

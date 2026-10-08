@@ -240,10 +240,18 @@ def main() -> int:
         check("shortcut_exit_code", res.returncode == 0, f"exit={res.returncode}")
         check("shortcut_created", os.path.isfile(lnk_path), lnk_path)
         if os.path.isfile(lnk_path):
-            sha = hashlib.sha256(open(lnk_path, "rb").read()).hexdigest()[:12]
             with open(lnk_path, "rb") as fh:
-                head = fh.read(4)
+                blob = fh.read()
+            sha = hashlib.sha256(blob).hexdigest()[:12]
+            head = blob[:4]
             check("shortcut_magic", head == b"\x4c\x00\x00\x00", f"header={head.hex()} sha={sha}")
+            # 用项目的读回接口再核一次目标（独立于创建路径）
+            try:
+                info = shortcut.read_shortcut(lnk_path)
+                same = os.path.normcase(info.get("target", "")) == os.path.normcase(target_exe)
+                check("shortcut_readback", same, f"target={info.get('target')}")
+            except OSError as exc:
+                check("shortcut_readback", False, repr(exc))
 
         if results and all(p for p, _ in results):
             print(f"\nE2E OK — 临时数据目录: {data_dir}（可删除）")

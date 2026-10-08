@@ -1,0 +1,43 @@
+[package]
+name = "exetrace"
+version = "1.0.0"
+edition = "2021"
+description = "ExeTrace — 应用历史定位器（Rust + Win32 原生控件版，无 UI 框架）"
+
+# 依赖用 cargo add 管理（版本以解析结果为准），此处只放构建配置。
+#
+# v1.0.0 原生控件版：**移除 eframe / egui / egui_extras** —— 界面改用
+# Windows 自带的公共控件（ListView / Edit / Button / ComboBox / StatusBar），
+# 目标：前台内存 ≤40MB、常驻 ≤15MB、exe ≤6MB。
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+log = { version = "0.4.34", features = ["std"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+winreg = "0.56.0"
+
+[profile.release]
+# 体积优先；无帧渲染循环的业务代码用 opt-level=z 无性能风险。
+opt-level = "z"
+lto = "thin"
+codegen-units = 4
+strip = true
