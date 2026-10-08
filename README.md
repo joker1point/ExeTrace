@@ -1,5 +1,9 @@
 # ExeTrace v3 — 应用历史 + 一键钉到桌面
 
+<p align="center">
+  <img src="assets/banner.png" width="720" alt="ExeTrace — 应用历史定位器：找回每一个你用过的软件">
+</p>
+
 **[⬇ 下载最新版](https://github.com/joker1point/ExeTrace/releases/latest)**（Windows 单文件 exe，双击即用，无需安装）
 
 **▶ [功能演示：6 张真机操作动图（搜索 / 右键菜单 / 一键钉桌面 / 启动 / 托盘热键 / 帮助）](exetrace-native/docs/feature-demo.md)**

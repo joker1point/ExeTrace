@@ -885,33 +885,25 @@ def acquire_single_instance() -> int | None:
 def make_app_icon_image(size: int = 64):
     """程序化绘制应用图标（窗口 / 托盘 / exe 图标三处共用的唯一绘制源）。
 
-    设计：蓝色渐变圆角方块 + 白色光标箭头 + 底部记录线 ——「定位到应用」语义。
+    设计（2026-10-08 换标）：墨黑圆角方块 + 左右两段断口弧 + 中心圆点 ——「定位 / 记录」语义。
+    与 video_assets/_logo/logo.png、Rust 版 exetrace-native/src/appicon.rs 同一视觉。
     """
     from PIL import Image, ImageDraw
 
     s = max(16, int(size))
-    top, bottom = (59, 130, 246), (29, 63, 168)
+    ink = (24, 24, 27)
 
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(img)
-    for y in range(s):
-        t = y / max(1, s - 1)
-        gd.line([(0, y), (s, y)], fill=(*(round(top[i] + (bottom[i] - top[i]) * t) for i in range(3)), 255))
-
-    pad = max(0, round(s * 0.045))
-    radius = max(2, round(s * 0.235))
-    mask = Image.new("L", (s, s), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        [pad, pad, s - pad - 1, s - pad - 1], radius=radius, fill=255
-    )
-    img.putalpha(mask)
-
     d = ImageDraw.Draw(img)
-    arrow = [
-        (0.30, 0.155), (0.30, 0.705), (0.425, 0.575), (0.535, 0.825),
-        (0.640, 0.770), (0.525, 0.530), (0.670, 0.510),
-    ]
-    d.polygon([(x * s, y * s) for x, y in arrow], fill=(255, 255, 255, 255))
-    lw = max(1, round(s * 0.052))
-    d.line([(0.27 * s, 0.895 * s), (0.73 * s, 0.895 * s)], fill=(255, 255, 255, 185), width=lw)
+    d.rounded_rectangle([0, 0, s - 1, s - 1], radius=max(2, round(s * 0.2266)), fill=(*ink, 255))
+
+    c = s / 2.0
+    ring_r = s * 0.336
+    width = max(1, round(s * 0.0586))
+    box = [c - ring_r, c - ring_r, c + ring_r, c + ring_r]
+    d.arc(box, start=-62, end=62, fill=(255, 255, 255, 255), width=width)
+    d.arc(box, start=118, end=242, fill=(255, 255, 255, 255), width=width)
+
+    dot = s * 0.121
+    d.ellipse([c - dot, c - dot, c + dot, c + dot], fill=(255, 255, 255, 255))
     return img
