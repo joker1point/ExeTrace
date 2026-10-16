@@ -132,9 +132,11 @@ const HELP_TEXT: &str = "ExeTrace —— 应用历史定位器\n\n\
 /// `EM_SETCUEBANNER`（编辑框水印；windows-sys 未导出该消息常量）。
 const EM_SETCUEBANNER: u32 = 0x1501;
 
+// 默认排序 = 最近打开（2026-10-16 用户口径「默认按时间排序」）；
+// 智能排序（frecency：打开次数 × 时间衰减）保留在下拉里，要用的自己切。
 const SORTS: [(&str, &str); 4] = [
-    ("智能排序", "smart"),
     ("最近打开", "recent"),
+    ("智能排序", "smart"),
     ("打开次数", "count"),
     ("名称", "name"),
 ];
