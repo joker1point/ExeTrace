@@ -1,4 +1,4 @@
-"""ExeTrace 短片生成器（~70 秒 / 1920x1080 / 30fps）。
+"""ExeTrace 短片生成器（约 52 秒 / 1920x1080 / 30fps）。
 
 把「真机操作 GIF」当演示素材，配上极简文字卡，全自动出一条短片：
 
@@ -7,7 +7,14 @@
 版式参考 B 站开源项目宣传片的常见做法（参考片：BV1Z1Hj6wEAy「VibeStart」）：
   · 浅色（米白）背景，内容居中，说明文字做成底部白底胶囊标签；
   · 不放编号 / 大标题 / 强调色，靠界面本身出彩；
-  · 开场与结尾用同款品牌卡，段落间淡入淡出。
+  · 开场与结尾用同款品牌卡。
+
+转场与运动（v2，2026-10-09 按用户反馈「转场相对单调」改造；标准见 vault
+《成片标准--封面节奏音效动图》§1.1）：
+  · 段间 = xfade 左滑（位移 + 淡化，XFADE 秒），不再是各自淡出再淡入；
+  · 静态卡 = zoompan 极缓慢推近（Ken Burns，KB_ZOOM），全程没有一帧死画面；
+  · 演示段时长按「GIF 整数遍 + 交叉补偿」取，循环接缝仍落在段边界；
+  · 转场音效铺在每次交叉的**中点**（assemble_xfade 返回的 marks）。
 
 用法：
     .venv-build\\Scripts\\python.exe tools\\make_short_video.py                 # 浅色版（默认）
@@ -37,6 +44,16 @@ FONT_BOLD = r"C:\Windows\Fonts\msyhbd.ttc"
 FONT_REG = r"C:\Windows\Fonts\msyh.ttc"
 
 W, H, FPS = 1920, 1080, 30
+
+# ---- v2 转场与运动（2026-10-09 用户反馈「转场相对单调」后新增；
+#      标准见 vault《成片标准--封面节奏音效动图》§1.1）：
+#   · 段间不再是纯 fade，而是 xfade 滑动转场（位移 + 淡化组合）
+#   · 静态卡加极缓慢推近（Ken Burns）—— 全程没有一帧死画面
+XFADE = 0.5        # 段间交叉时长（秒）
+KB_ZOOM = 0.03     # 静态卡 Ken Burns 幅度：整段缓慢放大 3%
+INTRO_SEC = 4.0    # 开场卡
+PAIN_SEC = 6.0     # 痛点卡
+END_SEC = 6.5      # 结尾卡
 
 # ---------------------------------------------------------------- 两套配色
 LIGHT = {
@@ -104,8 +121,12 @@ def fit_loops(gif_len: float, target: float, max_loops: int = 2) -> tuple[int, f
 
     对齐的意义：循环接缝正好落在段落边界，观众不会看到"同一段操作
     播到一半又从头开始"；最多 2 遍则避免同一画面重复太多次。
+
+    取整用 **floor 而不是 round**（2026-10-09 改）：GIF 修成原速后单体变长
+    （4~8s），round 会把 8.5s 的目标凑成 2 遍、段落凭空翻倍膨胀；floor 让它
+    保持 1 遍，段落长度自然贴合素材。
     """
-    loops = max(1, min(max_loops, round(target / gif_len)))
+    loops = max(1, min(max_loops, int(target / gif_len)))
     return loops, round(gif_len * loops, 2)
 
 
@@ -221,32 +242,82 @@ def demo_png(gif_name: str, num: str, title: str, sub: str, pal: dict, dark: boo
     return p
 
 
-def clip_static(name: str, png: Path, seconds: float) -> Path:
+def clip_static(name: str, png: Path, seconds: float,
+                fade_in: float = 0.0, fade_out: float = 0.0) -> Path:
+    """静态卡 → mp4。
+
+    v2：加极缓慢推近（Ken Burns，整段放大 KB_ZOOM）—— "没有一帧死画面"；
+    默认不再自带淡入淡出，段间过渡改由 assemble_xfade 的位移+淡化承担，
+    fade_in / fade_out 只给全片首尾卡用。
+    """
     out = SHORT / f"{name}.mp4"
-    fade = 0.35
+    n = max(1, int(seconds * FPS))
+    vf = (f"zoompan=z='1+{KB_ZOOM}*on/{n}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+          f"d=1:s={W}x{H}:fps={FPS}")
+    if fade_in > 0:
+        vf += f",fade=t=in:st=0:d={fade_in}"
+    if fade_out > 0:
+        vf += f",fade=t=out:st={seconds - fade_out}:d={fade_out}"
     ffd([
         "-loop", "1", "-i", str(png),
-        "-vf", f"fade=t=in:st=0:d={fade},fade=t=out:st={seconds - fade}:d={fade},format=yuv420p",
+        "-vf", f"{vf},format=yuv420p",
         "-t", str(seconds), "-r", str(FPS),
         "-c:v", "libx264", "-preset", "medium", "-crf", "18", str(out),
     ])
     return out
 
 
-def clip_demo(gif: Path, bg: Path, seconds: float, gy: int) -> Path:
+def clip_demo(gif: Path, bg: Path, seconds: float, gy: int,
+              fade_in: float = 0.0, fade_out: float = 0.0) -> Path:
+    """演示段 → mp4（背景卡 + GIF 叠层）。v2：段内淡入淡出默认关掉，交给 xfade。"""
     out = SHORT / f"seg_{gif.stem}.mp4"
-    fade = 0.3
+    tail = ""
+    if fade_in > 0:
+        tail += f",fade=t=in:st=0:d={fade_in}"
+    if fade_out > 0:
+        tail += f",fade=t=out:st={seconds - fade_out}:d={fade_out}"
     ffd([
         "-loop", "1", "-i", str(bg),
         "-stream_loop", "-1", "-i", str(gif),
         "-filter_complex",
         f"[1:v]scale={GW}:{GH}:flags=lanczos,fps={FPS},format=rgba[g];"
         f"[0:v][g]overlay={GX}:{gy}:shortest=0[v];"
-        f"[v]fade=t=in:st=0:d={fade},fade=t=out:st={seconds - fade}:d={fade},format=yuv420p",
+        f"[v]format=yuv420p{tail}",
         "-t", str(seconds), "-r", str(FPS),
         "-c:v", "libx264", "-preset", "medium", "-crf", "18", str(out),
     ])
     return out
+
+
+def assemble_xfade(clips: list[Path], lenses: list[float], out: Path) -> list[float]:
+    """用 xfade（左滑）把各段串成整片，返回每个交叉点的**中点时刻**（给转场音效用）。
+
+    v2 取代原来的 concat + 段内 fade：段与段之间是「位移 + 淡化」的连续过渡，
+    而不是各自淡出再淡入的换片。9 段的长滤镜链在 ffmpeg 4.3.1 上实测可用
+    （2026-10-09 先两段验证：4s + 6s - 0.5s = 9.5s / 285 帧，完全符合预期）；
+    若日后段数明显变多，再改成分治两两合并。
+    """
+    inputs: list[str] = []
+    for c in clips:
+        inputs += ["-i", str(c)]
+
+    chain: list[str] = []
+    prev = "[0:v]"
+    cur_len = lenses[0]
+    marks: list[float] = []
+    for i in range(1, len(clips)):
+        off = round(cur_len - XFADE, 3)
+        tag = f"[v{i}]"
+        chain.append(
+            f"{prev}[{i}:v]xfade=transition=slideleft:duration={XFADE}:offset={off}{tag}"
+        )
+        marks.append(round(off + XFADE / 2, 3))     # 交叉中点 = 视觉上的"换段时刻"
+        prev = tag
+        cur_len = cur_len + lenses[i] - XFADE
+
+    ffd([*inputs, "-filter_complex", ";".join(chain), "-map", prev,
+         "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", str(out)])
+    return marks
 
 
 def find_bgm(args: list[str]) -> Path | None:
@@ -373,40 +444,38 @@ def main() -> int:
         return 2
 
     gy = 205 if dark else 78
-    clips: list[Path] = [
-        clip_static("intro", card_png("intro", pal), 4.0),
-        clip_static("pain", card_png("pain", pal), 6.0),
-    ]
-    seg_lens: list[float] = []
+    # v2：首尾卡自带淡入/淡出，中间段一律不带 —— 段间过渡交给 xfade 的「位移 + 淡化」
+    clips: list[Path] = [clip_static("intro", card_png("intro", pal), INTRO_SEC, fade_in=0.5)]
+    lenses: list[float] = [INTRO_SEC]
+    clips.append(clip_static("pain", card_png("pain", pal), PAIN_SEC))
+    lenses.append(PAIN_SEC)
+
     for gif_name, num, title, sub, target in DEMOS:
         gpath = GIF_DIR / f"{gif_name}.gif"
         glen = gif_duration(gpath)
-        loops, secs = fit_loops(glen, target)
-        seg_lens.append(secs)
+        # 这段的尾部要与下一段交叉 XFADE 秒，目标时长补回来才不会被"吃掉"
+        loops, secs = fit_loops(glen, target + XFADE)
+        secs = max(secs, XFADE + 1.0)
         bg = demo_png(gif_name, num, title, sub, pal, dark)
         p = clip_demo(gpath, bg, secs, gy)
         clips.append(p)
+        lenses.append(secs)
         print(f"  段 {num} {title} → {p.name}（GIF {glen:.2f}s × {loops} 遍 = {secs}s）")
-    clips.append(clip_static("end", card_png("end", pal), 6.5))
 
-    listfile = SHORT / "concat.txt"
-    listfile.write_text("".join(f"file '{c.as_posix()}'\n" for c in clips), encoding="utf-8")
-    ffd(["-f", "concat", "-safe", "0", "-i", str(listfile), "-c", "copy", str(out)])
+    clips.append(clip_static("end", card_png("end", pal), END_SEC, fade_out=0.6))
+    lenses.append(END_SEC)
 
-    total = 4.0 + 6.0 + sum(seg_lens) + 6.5
+    marks = assemble_xfade(clips, lenses, out)
+    total = sum(lenses) - XFADE * (len(clips) - 1)
 
-    # 音频：BGM 铺底 + 段落边界转场音效（与分段时长对齐）
-    marks: list[float] = [4.0, 10.0]
-    t = 10.0
-    for secs in seg_lens:
-        t += secs
-        marks.append(round(t, 2))
+    # 音频：BGM 铺底 + 每次段间交叉的中点一声 whoosh（最后一个交叉留给结尾卡淡出）
     bgm = find_bgm(args)
-    attach_audio(out, marks[:-1], total, bgm)   # 最后一段边界留给结尾卡淡出，不叠音效
+    attach_audio(out, marks[:-1], total, bgm)
     if bgm:
         print(f"  BGM：{bgm.name}")
 
-    print(f"\n成片（{theme} 主题）：{out}（约 {total:.0f} 秒，{out.stat().st_size / 1048576:.1f} MB，含 BGM + 转场音效）")
+    print(f"\n成片（{theme} 主题）：{out}（约 {total:.0f} 秒，"
+          f"{out.stat().st_size / 1048576:.1f} MB，含 BGM + 段间滑动转场 + 转场音效）")
     return 0
 
 
