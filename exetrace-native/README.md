@@ -1,6 +1,8 @@
 # ExeTrace — Rust / Win32 原生控件版
 
 > **[→ 功能演示：6 张真实操作动图（搜索 / 右键菜单 / 一键钉桌面 / 启动 / 托盘热键 / 帮助）](docs/feature-demo.md)**
+>
+> **[⬇ 下载单文件版（ExeTrace-native-1.1.0-win64.exe，1.72 MB，双击即用）](https://github.com/joker1point/ExeTrace/releases/tag/v1.1.0-native)**
 
 用系统自带的原生控件（`SysListView32` / `Edit` / 菜单 / 托盘）重写的 ExeTrace——把「体积与内存」这条线做到头：**没有 UI 框架，没有 GPU 上下文，常驻不到 2 MB。**
 
@@ -8,11 +10,11 @@
 
 | | Python / tkinter 版 | Rust / egui 版 | **本版（Rust / Win32 原生）** |
 |---|---|---|---|
-| exe 体积 | 20.42 MB | 6.8 MB | **1.61 MB** |
-| 窗口打开 | 124 MB | 141 MB | **≈ 58 MB** |
-| **托盘常驻** | 9.2 MB | 166 MB（不释放） | **≈ 2 MB** |
+| exe 体积 | 20.42 MB | 6.8 MB | **1.72 MB** |
+| 窗口打开 | 124 MB | 141 MB | **≈ 13 MB** |
+| **托盘常驻** | 9.2 MB | 166 MB（不释放） | **≈ 4.5 MB** |
 
-测法：`Get-Process` 的 `WorkingSet64`。常驻值在「关窗缩托盘」后 5 秒读取（本版缩托盘时会主动把空闲工作集还给系统）。
+测法：`Get-Process` 的 `WorkingSet64`（2026-10-16 v1.1.0 实测：窗口 13.4 MB / 关窗缩托盘 5 秒后 4.5 MB）。常驻值在「关窗缩托盘」后 5 秒读取（本版缩托盘时会主动把空闲工作集还给系统）。
 
 结论：egui/eframe 那条线的内存下限是**框架基线**（最小空壳即 115.6 MB，见 `../exetrace-rs/README.md`），
 所以「Rust + 低内存」只能走原生控件这条路。

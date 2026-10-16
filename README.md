@@ -92,7 +92,7 @@ ExeTrace 把「数据」和「能力」都开了一个机器可读的口子，�
 | 版本 | 位置 | exe 体积 | 特点 |
 |---|---|---|---|
 | **Python / tkinter（release 版）** | 根目录 | 20.4 MB | 功能最全（搜索排序 / 图标 / 托盘 / 一键钉桌面 / 分类 / 使用时长）；常态 CPU ≈ 2%（单核），**后台/最小化内存 5-8 MB** |
-| **Rust / Win32 原生（新，推荐自构建）** | `exetrace-native/` | **1.61 MB** | 系统原生控件、不含任何 UI 框架：**托盘常驻约 2 MB**、窗口打开约 58 MB；功能对齐 v3.1。**[功能演示（6 张真机动图）](exetrace-native/docs/feature-demo.md)** |
+| **Rust / Win32 原生（新，推荐）** | `exetrace-native/` | **1.72 MB** | 系统原生控件、不含任何 UI 框架：**托盘常驻约 4.5 MB**、窗口打开约 13 MB（2026-10-16 实测）；功能对齐 v3.1，并新增 运行中自动隐藏 / 本机项目管理 /「交给 Agent」接口。**[下载 v1.1.0-native](https://github.com/joker1point/ExeTrace/releases/tag/v1.1.0-native)** · **[功能演示（6 张真机动图）](exetrace-native/docs/feature-demo.md)** |
 | Rust / egui（实验） | `exetrace-rs/` | 6.8 MB | 冷启动快、体积小；内存偏高（约 120 MB，为 egui 框架基线） |
 
 两个版本共用同一 SQLite 库（`%LOCALAPPDATA%\ExeTrace\history.db`，schema 一致），数据互通；不建议同时常驻（会双重记录）。
