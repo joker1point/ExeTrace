@@ -4,7 +4,7 @@
 //! 开机自启（注册表）/ 单实例（互斥体）/ 启动与资源管理器定位。
 
 use std::collections::HashSet;
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HWND, LPARAM};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HWND, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
     BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
@@ -12,16 +12,22 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+use windows_sys::Win32::System::Memory::{
+    VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
+    PROCESS_VM_READ, PROCESS_VM_WRITE,
 };
 use windows_sys::Win32::UI::Shell::{
     ShellExecuteW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, DrawIconEx, EnumWindows, GetWindowThreadProcessId, IsWindowVisible, MessageBoxW,
-    SendMessageTimeoutW, DI_NORMAL, MB_ICONINFORMATION, MB_OK, SMTO_ABORTIFHUNG, SW_SHOWNORMAL,
-    WM_GETTEXTLENGTH,
+    DestroyIcon, DrawIconEx, EnumWindows, FindWindowExW, FindWindowW, GetSystemMetrics,
+    GetWindowThreadProcessId, IsWindowVisible, MessageBoxW, SendMessageTimeoutW,
+    SystemParametersInfoW, DI_NORMAL, MB_ICONINFORMATION, MB_OK, SMTO_ABORTIFHUNG, SM_CXSCREEN,
+    SM_CYSCREEN, SPI_GETWORKAREA, SW_SHOWNORMAL, WM_GETTEXTLENGTH,
 };
 
 pub fn wide(s: &str) -> Vec<u16> {
@@ -171,6 +177,45 @@ pub fn process_exe_path(pid: u32) -> Option<String> {
     }
 }
 
+/// 「哪些应用正在运行」的判定数据（列表自动屏蔽运行中应用用，2026-10-15）。
+///
+/// `stems` = 列表各行应用名的小写集合；只对这些名字命中的人逐一确认 exe 路径
+/// （先按进程名做便宜预筛，避免对全机几百个进程逐一 OpenProcess）。
+///
+/// 返回 `(路径集合, 兜底名集合)`：
+/// - 路径集合 = 确认路径匹配的行 exe 全路径（小写）；
+/// - 兜底名集合 = 名字命中、但路径读不出来（提权 / 受保护进程）的进程名 ——
+///   按「同名即算在运行」保守处理：宁可多藏一行，也别把正在跑的应用留在列表里。
+pub fn running_exe_lookup(
+    stems: &std::collections::HashSet<String>,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    use std::collections::HashSet;
+    let mut paths: HashSet<String> = HashSet::new();
+    let mut fallback: HashSet<String> = HashSet::new();
+    if stems.is_empty() {
+        return (paths, fallback);
+    }
+    for p in snapshot_processes() {
+        let name = p.name.to_lowercase();
+        let stem = name.strip_suffix(".exe").unwrap_or(name.as_str());
+        if !stems.contains(stem) {
+            continue;
+        }
+        match process_exe_path(p.pid) {
+            Some(path) => {
+                paths.insert(path.to_lowercase());
+            }
+            None => {
+                fallback.insert(stem.to_string());
+            }
+        }
+    }
+    (paths, fallback)
+}
+
 // ---------------------------------------------------------------- 图标提取
 
 pub fn extract_icon_rgba(exe_path: &str, size: i32) -> Option<(usize, usize, Vec<u8>)> {
@@ -266,11 +311,13 @@ pub fn launch_path(path: &str) -> bool {
 }
 
 pub fn reveal_in_explorer(path: &str) {
-    let folder = std::path::Path::new(path)
+    let p = std::path::Path::new(path);
+    let folder = p
         .parent()
-        .map(|p| p.to_path_buf())
+        .map(|x| x.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from(path));
-    if std::path::Path::new(path).is_file() {
+    if p.is_file() || p.is_dir() {
+        // 文件 / 目录都统一「在父目录中选中它」（目录也吃 /select）。
         let _ = std::process::Command::new("explorer")
             .arg(format!("/select,{}", path))
             .spawn();
@@ -378,6 +425,221 @@ pub fn desktop_dir() -> String {
     }
     let home = std::env::var("USERPROFILE").unwrap_or_default();
     format!("{home}\\Desktop")
+}
+
+// ---------------------------------------------------------------- 桌面图标方位（2026-10-09）
+
+// ListView 消息（winx 没引 Controls 模块，这里直接给数值：LVM_FIRST = 0x1000）。
+const LVM_GETITEMCOUNT: u32 = 0x1004;
+const LVM_GETITEMPOSITION: u32 = 0x1010;
+
+/// `SendMessageTimeoutW` 的薄封装：Explorer 忙时宁可返回 None，也不要把 UI 线程挂住。
+fn send_timeout(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<usize> {
+    let mut out: usize = 0;
+    let ok = unsafe {
+        SendMessageTimeoutW(hwnd, msg, wparam, lparam, SMTO_ABORTIFHUNG, 800, &mut out)
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+unsafe extern "system" fn find_defview_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+    let out = lparam as *mut HWND;
+    let defview_class = wide("SHELLDLL_DefView");
+    let list_class = wide("SysListView32");
+    let defview = FindWindowExW(hwnd, std::ptr::null_mut(), defview_class.as_ptr(), std::ptr::null());
+    if !defview.is_null() {
+        let lv = FindWindowExW(defview, std::ptr::null_mut(), list_class.as_ptr(), std::ptr::null());
+        if !lv.is_null() {
+            *out = lv;
+            return 0; // 找到即停止枚举
+        }
+    }
+    1
+}
+
+/// 桌面图标的 ListView 句柄。
+///
+/// 宿主通常是 `Progman`；开了壁纸幻灯片等场景下 `SHELLDLL_DefView` 会被挂到某个
+/// `WorkerW` 上，所以要留一条"遍历顶层窗口找"的退路。
+fn desktop_listview() -> Option<HWND> {
+    unsafe {
+        let progman_class = wide("Progman");
+        let progman = FindWindowW(progman_class.as_ptr(), std::ptr::null());
+        if !progman.is_null() {
+            let defview_class = wide("SHELLDLL_DefView");
+            let list_class = wide("SysListView32");
+            let defview = FindWindowExW(progman, std::ptr::null_mut(), defview_class.as_ptr(), std::ptr::null());
+            if !defview.is_null() {
+                let lv = FindWindowExW(defview, std::ptr::null_mut(), list_class.as_ptr(), std::ptr::null());
+                if !lv.is_null() {
+                    return Some(lv);
+                }
+            }
+        }
+
+        let mut found: HWND = std::ptr::null_mut();
+        EnumWindows(Some(find_defview_proc), &mut found as *mut HWND as LPARAM);
+        if found.is_null() {
+            None
+        } else {
+            Some(found)
+        }
+    }
+}
+
+/// 桌面图标的**批量屏幕坐标**（物理像素；只读）。
+///
+/// 为什么要跨进程：`LVM_GETITEMPOSITION` 是把坐标**写进一块内存**再取回，所以要先在
+/// Explorer 进程里分配 8 字节/项、逐项发消息、一次性读回、最后释放。全程只读，
+/// 不修改 Explorer 的任何数据。
+///
+/// 用途：钉完桌面快捷方式后告诉用户"它落在桌面哪个方位"。做法是**建前建后各读一次**，
+/// 多出来的那个坐标就是新图标 —— 比"按序号推算"可靠：桌面图标会重排，且很容易超出一屏
+/// （实测本机 91 个图标，而一屏只放得下 36 个）。
+///
+/// 进程已 Per-Monitor V2 DPI-aware，这里拿到的是物理像素，与 `primary_work_area()`
+/// 同一坐标系。
+pub fn desktop_icon_positions() -> Option<Vec<(i32, i32)>> {
+    unsafe {
+        let lv = desktop_listview()?;
+
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(lv, &mut pid);
+        if pid == 0 {
+            return None;
+        }
+
+        let proc = OpenProcess(
+            PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE,
+            0,
+            pid,
+        );
+        if proc.is_null() {
+            return None;
+        }
+
+        let count = match send_timeout(lv, LVM_GETITEMCOUNT, 0, 0) {
+            Some(n) => n,
+            None => {
+                CloseHandle(proc);
+                return None;
+            }
+        };
+        if count == 0 {
+            CloseHandle(proc);
+            return Some(Vec::new());
+        }
+
+        let bytes = count * 8;
+        let buf = VirtualAllocEx(
+            proc,
+            std::ptr::null(),
+            bytes,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        );
+        if buf.is_null() {
+            CloseHandle(proc);
+            return None;
+        }
+
+        let mut ok = true;
+        for i in 0..count {
+            let slot = buf as usize + i * 8;
+            if send_timeout(lv, LVM_GETITEMPOSITION, i, slot as LPARAM).is_none() {
+                ok = false;
+                break;
+            }
+        }
+
+        let mut out = Vec::with_capacity(count);
+        if ok {
+            let mut raw = vec![0i32; count * 2];
+            let mut got: usize = 0;
+            let read = ReadProcessMemory(
+                proc,
+                buf as *const std::ffi::c_void,
+                raw.as_mut_ptr() as *mut std::ffi::c_void,
+                bytes,
+                &mut got,
+            );
+            if read != 0 && got == bytes {
+                for i in 0..count {
+                    out.push((raw[i * 2], raw[i * 2 + 1]));
+                }
+            }
+        }
+
+        VirtualFreeEx(proc, buf, 0, MEM_RELEASE);
+        CloseHandle(proc);
+        if out.len() == count {
+            Some(out)
+        } else {
+            None
+        }
+    }
+}
+
+/// 主显示器工作区（物理像素）。
+pub fn primary_work_area() -> (i32, i32, i32, i32) {
+    unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        let ok = SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut r as *mut RECT as *mut std::ffi::c_void,
+            0,
+        );
+        if ok != 0 && r.right > r.left && r.bottom > r.top {
+            (r.left, r.top, r.right, r.bottom)
+        } else {
+            (
+                0,
+                0,
+                GetSystemMetrics(SM_CXSCREEN),
+                GetSystemMetrics(SM_CYSCREEN),
+            )
+        }
+    }
+}
+
+/// 桌面**八方位**（3×3 网格去掉中心）。用户口径：只说"大致在哪个区"。
+///
+/// 中心格也有名字（"中央"）—— 真落在正中间时总得有个说法。
+pub fn zone_of(x: i32, y: i32, wa: (i32, i32, i32, i32)) -> &'static str {
+    let (l, t, r, b) = wa;
+    let fx = (x - l) as f32 / (r - l).max(1) as f32;
+    let fy = (y - t) as f32 / (b - t).max(1) as f32;
+    let third = 1.0_f32 / 3.0;
+    let col = if fx < third {
+        0
+    } else if fx < third * 2.0 {
+        1
+    } else {
+        2
+    };
+    let row = if fy < third {
+        0
+    } else if fy < third * 2.0 {
+        1
+    } else {
+        2
+    };
+    match (col, row) {
+        (0, 0) => "左上",
+        (1, 0) => "上方",
+        (2, 0) => "右上",
+        (0, 1) => "左侧",
+        (1, 1) => "中央",
+        (2, 1) => "右侧",
+        (0, 2) => "左下",
+        (1, 2) => "下方",
+        _ => "右下",
+    }
 }
 
 // ---------------------------------------------------------------- 托盘（自研，独立线程）

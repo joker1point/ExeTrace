@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS apps (
     first_seen    REAL,
     last_seen     REAL,
     source        TEXT NOT NULL DEFAULT 'scan',
+    origin        TEXT NOT NULL DEFAULT '',
     pinned        INTEGER NOT NULL DEFAULT 0,
     total_seconds REAL NOT NULL DEFAULT 0
 );
@@ -25,6 +26,8 @@ pub struct AppRow {
     pub first_seen: Option<f64>,
     pub last_seen: Option<f64>,
     pub source: String,
+    /// 项目档位（source='project' 时有效）：own / clone / local；应用行为空串。
+    pub origin: String,
     pub pinned: bool,
     pub total_seconds: f64,
 }
@@ -65,6 +68,9 @@ impl Store {
         }
         if !cols.iter().any(|c| c == "total_seconds") {
             conn.execute("ALTER TABLE apps ADD COLUMN total_seconds REAL NOT NULL DEFAULT 0", [])?;
+        }
+        if !cols.iter().any(|c| c == "origin") {
+            conn.execute("ALTER TABLE apps ADD COLUMN origin TEXT NOT NULL DEFAULT ''", [])?;
         }
         Ok(())
     }
@@ -145,6 +151,33 @@ impl Store {
         Ok(())
     }
 
+    /// 项目扫描的种子记录（`source='project'`）：只更新元数据，**不动** `pinned` /
+    /// 使用统计（重扫不惩罚用户钉过的项目）。批量扫描由调用方在结尾统一 `mark_changed`。
+    pub fn upsert_project(
+        &mut self,
+        path: &str,
+        name: &str,
+        origin: &str,
+        last_seen: Option<f64>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO apps(path, name, launch_count, first_seen, last_seen, source, origin)
+             VALUES(?1, ?2, 0, NULL, ?3, 'project', ?4)
+             ON CONFLICT(path) DO UPDATE SET
+                 name      = excluded.name,
+                 origin    = excluded.origin,
+                 last_seen = COALESCE(excluded.last_seen, apps.last_seen),
+                 source    = CASE WHEN apps.source = 'watch' THEN 'watch' ELSE 'project' END",
+            params![path, name, last_seen, origin],
+        )?;
+        Ok(())
+    }
+
+    /// 批量写入后手动标脏一次（避免逐行 bump 造成扫描期间 UI 反复重建）。
+    pub fn mark_changed(&mut self) {
+        self.bump();
+    }
+
     pub fn remove(&mut self, exe_path: &str) -> rusqlite::Result<()> {
         self.conn
             .execute("DELETE FROM apps WHERE path = ?1", params![exe_path])?;
@@ -163,7 +196,9 @@ impl Store {
         }
         let mut removed = 0usize;
         for p in paths {
-            if !std::path::Path::new(&p).is_file() {
+            // 应用行 = 文件；项目行 = 目录。两者都不存在才算真的失效。
+            let path = std::path::Path::new(&p);
+            if !path.is_file() && !path.is_dir() {
                 self.conn
                     .execute("DELETE FROM apps WHERE path = ?1", params![p])?;
                 removed += 1;
@@ -175,20 +210,63 @@ impl Store {
         Ok(removed)
     }
 
-    pub fn query(&self, keyword: &str, sort: &str, limit: i64) -> rusqlite::Result<Vec<AppRow>> {
+    /// `view`：`all` / `app` / `project`（项目 = `source='project'` 的行）。
+    /// `days > 0` 时**应用行**只保留「最后打开时间在最近 days 天内」的（无时间戳的注册表
+    /// 回填会被过滤）；**项目行不受 days 过滤** —— 仓库多久没动都该能被找到。
+    pub fn query(
+        &self,
+        keyword: &str,
+        sort: &str,
+        limit: i64,
+        days: i64,
+        view: &str,
+    ) -> rusqlite::Result<Vec<AppRow>> {
         let kw = keyword.trim();
         // smart（frecency）在 Rust 侧排序：SQLite 默认没有 exp()；
         // 其它排序交给 SQL。SQL 侧统一加防御性 LIMIT（smart 取全量再截断）。
-        let (order, sql_limit) = match sort {
-            "count" => ("ORDER BY launch_count DESC, COALESCE(last_seen, 0) DESC", limit),
-            "name" => ("ORDER BY name COLLATE NOCASE, path COLLATE NOCASE", limit),
-            "smart" => ("", limit.max(5000)),
-            _ => ("ORDER BY COALESCE(last_seen, 0) DESC, name COLLATE NOCASE", limit),
+        // 项目视图：先按档位分组（own → clone → local），**档内再按所选排序** ——
+        // 用户切「最近打开」时必须真的按时间排（2026-10-15 反馈修正）。
+        // smart 在项目里没有意义（launch_count 全为 0），退化为时间排序。
+        let (order, sql_limit) = if view == "project" {
+            let sub = match sort {
+                "count" => "launch_count DESC, COALESCE(last_seen, 0) DESC",
+                "name" => "name COLLATE NOCASE, path COLLATE NOCASE",
+                _ => "COALESCE(last_seen, 0) DESC, name COLLATE NOCASE",
+            };
+            (
+                format!(
+                    "ORDER BY CASE origin WHEN 'own' THEN 0 WHEN 'clone' THEN 1 ELSE 2 END, {sub}"
+                ),
+                limit,
+            )
+        } else {
+            match sort {
+                "count" => (
+                    "ORDER BY launch_count DESC, COALESCE(last_seen, 0) DESC".to_string(),
+                    limit,
+                ),
+                "name" => ("ORDER BY name COLLATE NOCASE, path COLLATE NOCASE".to_string(), limit),
+                "smart" => (String::new(), limit.max(5000)),
+                _ => (
+                    "ORDER BY COALESCE(last_seen, 0) DESC, name COLLATE NOCASE".to_string(),
+                    limit,
+                ),
+            }
+        };
+        let days = days.clamp(0, 3650);
+        let cutoff = if days > 0 {
+            unix_now() - days as f64 * 86400.0
+        } else {
+            0.0
         };
         let sql = format!(
-            "SELECT path, name, launch_count, first_seen, last_seen, source, pinned, total_seconds
+            "SELECT path, name, launch_count, first_seen, last_seen, source, origin, pinned, total_seconds
              FROM apps
              WHERE (?1 = '' OR name LIKE ?2 ESCAPE '\\' OR path LIKE ?2 ESCAPE '\\')
+               AND (?4 = 0 OR source = 'project' OR (last_seen IS NOT NULL AND last_seen >= ?5))
+               AND (?6 = 'all'
+                    OR (?6 = 'project' AND source = 'project')
+                    OR (?6 = 'app' AND source != 'project'))
              {order} LIMIT ?3"
         );
         let like = format!(
@@ -196,7 +274,7 @@ impl Store {
             kw.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![kw, like, sql_limit], |r| {
+        let rows = stmt.query_map(params![kw, like, sql_limit, days, cutoff, view], |r| {
             Ok(AppRow {
                 path: r.get(0)?,
                 name: r.get(1)?,
@@ -204,12 +282,13 @@ impl Store {
                 first_seen: r.get(3)?,
                 last_seen: r.get(4)?,
                 source: r.get(5)?,
-                pinned: r.get::<_, i64>(6)? != 0,
-                total_seconds: r.get(7)?,
+                origin: r.get(6)?,
+                pinned: r.get::<_, i64>(7)? != 0,
+                total_seconds: r.get(8)?,
             })
         })?;
         let mut out: Vec<AppRow> = rows.collect::<rusqlite::Result<_>>()?;
-        if sort == "smart" {
+        if sort == "smart" && view != "project" {
             let now = unix_now();
             out.sort_by(|a, b| {
                 frecency(b, now)
@@ -255,9 +334,17 @@ impl Store {
         Ok(())
     }
 
+    /// 「已收录」应用数（不含项目行；项目单独统计）。
     pub fn total(&self) -> i64 {
         self.conn
-            .query_row("SELECT COUNT(*) FROM apps", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM apps WHERE source != 'project'", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// 已收录的项目数。
+    pub fn total_projects(&self) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM apps WHERE source = 'project'", [], |r| r.get(0))
             .unwrap_or(0)
     }
 
@@ -265,7 +352,7 @@ impl Store {
         let start = today_start_ts();
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM apps WHERE last_seen >= ?1",
+                "SELECT COUNT(*) FROM apps WHERE last_seen >= ?1 AND source != 'project'",
                 params![start],
                 |r| r.get(0),
             )
@@ -274,7 +361,7 @@ impl Store {
 
     /// 按启动次数排序取前 N（用于「Dashboard」式统计，暂未使用也保留接口）。
     pub fn top_by_count(&self, n: i64) -> rusqlite::Result<Vec<AppRow>> {
-        self.query("", "count", n)
+        self.query("", "count", n, 0, "app")
     }
 }
 

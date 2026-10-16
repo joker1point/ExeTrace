@@ -4,14 +4,23 @@
 //!   exetrace.exe              正常启动（GUI + 托盘 + 后台记录）
 //!   exetrace.exe --minimized  启动后直接缩到托盘
 //!   exetrace.exe --selftest   非 GUI 自检（报告落盘）
+//!
+//! 「交给 Agent」接口（2026-10-16，实现见 `agent.rs`）：
+//!   exetrace.exe --export [输出路径]                     全量数据 JSON（apps + projects，schema v2）
+//!   exetrace.exe --find <关键词>                         查找（stdout JSON；0=有结果 1=无结果 2=出错）
+//!   exetrace.exe --launch <路径>                         打开应用 / 文件夹
+//!   exetrace.exe --make-shortcut <路径> [--name 名称]    钉到桌面（读回校验）
+//!   exetrace.exe --agent-guide [输出路径]                生成接口说明（默认 <数据目录>\agent-guide.md）
 
 // 正式产物（release）不弹控制台窗口；debug 保留控制台便于排查。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent;
 mod appicon;
 mod config;
 mod fghook;
 mod paths;
+mod projects;
 mod resolver;
 mod scanner;
 mod selftest;
@@ -33,6 +42,11 @@ fn main() -> ExitCode {
         return if selftest::run() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
     }
 
+    // CLI：导出数据（JSON）—— 「personal agent 采集友好」的最小数据接口（2026-10-15）。
+    if args.iter().any(|a| a == "--export") {
+        return cli_export(&args);
+    }
+
     // CLI：直接创建桌面快捷方式（脚本/批量用；退出码 0 = 已创建且读回校验通过）
     if let Some(i) = args.iter().position(|a| a == "--make-shortcut") {
         let Some(path) = args.get(i + 1) else {
@@ -46,6 +60,29 @@ fn main() -> ExitCode {
             .cloned()
             .unwrap_or_default();
         return cli_make_shortcut(path, &name);
+    }
+
+    // CLI（「交给 Agent」接口，2026-10-16）：查找 / 打开 / 交接说明。
+    if let Some(i) = args.iter().position(|a| a == "--find") {
+        match args.get(i + 1).filter(|s| !s.starts_with("--")) {
+            Some(kw) => return cli_find(kw),
+            None => {
+                eprintln!("用法: ExeTrace.exe --find <关键词>");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if let Some(i) = args.iter().position(|a| a == "--launch") {
+        match args.get(i + 1).filter(|s| !s.starts_with("--")) {
+            Some(p) => return cli_launch(p),
+            None => {
+                eprintln!("用法: ExeTrace.exe --launch <路径>");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if args.iter().any(|a| a == "--agent-guide") {
+        return cli_agent_guide(&args);
     }
 
     init_logging();
@@ -69,12 +106,22 @@ fn main() -> ExitCode {
         }
     };
 
-    // 冷启动扫描（后台线程）
+    // 冷启动扫描（后台线程）：注册表历史
     {
         let st = store.clone();
         std::thread::spawn(move || {
             if let Ok(mut s) = st.lock() {
                 scanner::scan_all(&mut s);
+            }
+        });
+    }
+
+    // 冷启动扫描（后台线程）：本机 git 项目（2026-10-15，「管理项目入口」的地基）
+    {
+        let st = store.clone();
+        std::thread::spawn(move || {
+            if let Ok(mut s) = st.lock() {
+                projects::scan_all(&mut s);
             }
         });
     }
@@ -101,6 +148,45 @@ fn main() -> ExitCode {
     watcher.stop();
     log::info!("已退出");
     code
+}
+
+/// CLI：导出库内容为 JSON（默认 `<data_dir>\export.json`，可传一个输出路径）。
+/// schema `exetrace.export` v2：`apps[]` 与 `projects[]` 分开（见 `agent.rs`）。
+fn cli_export(args: &[String]) -> ExitCode {
+    use std::io::Write;
+    let i = args.iter().position(|a| a == "--export").unwrap_or(0);
+    let out = args
+        .get(i + 1)
+        .filter(|s| !s.starts_with("--"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| paths::data_dir().join("export.json"));
+    let store = match store::Store::open(&paths::db_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "error: 无法打开历史库: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let doc = agent::export_doc(&store);
+    let text = match serde_json::to_string_pretty(&doc) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "error: 序列化失败: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(e) = std::fs::write(&out, text) {
+        let _ = writeln!(std::io::stderr(), "error: 写入失败: {e}");
+        return ExitCode::from(2);
+    }
+    let _ = writeln!(
+        std::io::stdout(),
+        "exported: {} (apps={}, projects={})",
+        out.display(),
+        doc["counts"]["apps"],
+        doc["counts"]["projects"]
+    );
+    ExitCode::SUCCESS
 }
 
 /// CLI：创建桌面快捷方式并读回校验。退出码：0 成功 / 3 解析失败 / 4 创建失败 / 5 校验不一致。
@@ -139,6 +225,70 @@ fn cli_make_shortcut(raw_path: &str, name: &str) -> ExitCode {
             ExitCode::from(4)
         }
     }
+}
+
+/// CLI：关键词查找（应用 + 项目；stdout 输出 JSON）。
+/// 退出码：0 = 有结果 / 1 = 无结果 / 2 = 出错。
+fn cli_find(keyword: &str) -> ExitCode {
+    use std::io::Write;
+    let store = match store::Store::open(&paths::db_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "error: 无法打开历史库: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let doc = agent::find_doc(&store, keyword, 20);
+    let count = doc["count"].as_i64().unwrap_or(0);
+    match serde_json::to_string_pretty(&doc) {
+        Ok(text) => {
+            let _ = writeln!(std::io::stdout(), "{text}");
+            if count > 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "error: 序列化失败: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// CLI：打开应用 / 文件夹（`--launch <路径>`）。退出码：0 = 已启动 / 1 = 失败或路径不存在。
+fn cli_launch(path: &str) -> ExitCode {
+    use std::io::Write;
+    if !std::path::Path::new(path).exists() {
+        let _ = writeln!(std::io::stderr(), "error: 路径不存在: {path}");
+        return ExitCode::from(1);
+    }
+    if winx::launch_path(path) {
+        ExitCode::SUCCESS
+    } else {
+        let _ = writeln!(std::io::stderr(), "error: 启动失败: {path}");
+        ExitCode::from(1)
+    }
+}
+
+/// CLI：生成「交给 Agent」的接口说明（Markdown；默认 `<数据目录>\agent-guide.md`）。
+/// 全文同时打印到 stdout —— 用户直接复制转发给任意 AI Agent 即可。
+fn cli_agent_guide(args: &[String]) -> ExitCode {
+    use std::io::Write;
+    let i = args.iter().position(|a| a == "--agent-guide").unwrap_or(0);
+    let out = args
+        .get(i + 1)
+        .filter(|s| !s.starts_with("--"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(agent::guide_path);
+    let text = agent::guide_text();
+    if let Err(e) = std::fs::write(&out, &text) {
+        let _ = writeln!(std::io::stderr(), "error: 写入失败: {e}");
+        return ExitCode::from(2);
+    }
+    let _ = writeln!(std::io::stdout(), "guide: {}", out.display());
+    let _ = writeln!(std::io::stdout(), "{text}");
+    ExitCode::SUCCESS
 }
 
 fn init_logging() {

@@ -4,6 +4,7 @@
 
 use std::io::Write;
 
+use crate::agent;
 use crate::paths;
 use crate::resolver;
 use crate::scanner;
@@ -53,7 +54,7 @@ pub fn run() -> bool {
                 let c2 = st.record_launch(first, 300.0).unwrap_or(false);
                 report(&mut lines, &mut ok, "store_dedupe", !c2, &format!("counted={c2}"));
 
-                let rows = st.query("", "count", 50).unwrap_or_default();
+                let rows = st.query("", "count", 50, 0, "all").unwrap_or_default();
                 report(&mut lines, &mut ok, "store_query", !rows.is_empty(), &format!("rows={}", rows.len()));
 
                 // v3.1：pinned 标记 + 使用时长累加 + smart 排序
@@ -61,17 +62,92 @@ pub fn run() -> bool {
                 let mut usage = std::collections::HashMap::new();
                 usage.insert(first.clone(), 12.0);
                 st.add_usage(&usage);
-                let rows31 = st.query("", "name", 50).unwrap_or_default();
+                let rows31 = st.query("", "name", 50, 0, "all").unwrap_or_default();
                 let hit = rows31.iter().find(|r| r.path.eq_ignore_ascii_case(first));
                 let ok31 = hit
                     .map(|r| r.pinned && (r.total_seconds - 12.0).abs() < 0.001)
                     .unwrap_or(false);
                 report(&mut lines, &mut ok, "store_v31_columns", ok31, "pinned=1 / total_seconds=12");
-                let smart = st.query("", "smart", 50).unwrap_or_default();
+                let smart = st.query("", "smart", 50, 0, "all").unwrap_or_default();
                 report(&mut lines, &mut ok, "store_smart_sort", !smart.is_empty(), &format!("{} 行", smart.len()));
 
                 let _ = st.remove(first);
                 report(&mut lines, &mut ok, "store_remove", st.total() == samples.len().min(3) as i64 - 1, &format!("total={}", st.total()));
+            }
+            // 天数过滤：全新的「40 天前」记录在 days=30 下隐藏、days=0 下可见
+            // （用不存在的假路径 + upsert_seed 的 MAX(last_seen) 语义避开既有行）
+            {
+                let old_path = r"C:\__selftest__\old_tool.exe";
+                let old_ts = crate::store::unix_now() - 40.0 * 86400.0;
+                let _ = st.upsert_seed(old_path, Some(1), Some(old_ts));
+                let recent = st.query("", "count", 50, 30, "all").unwrap_or_default();
+                let all = st.query("", "count", 50, 0, "all").unwrap_or_default();
+                let hidden = !recent.iter().any(|r| r.path.eq_ignore_ascii_case(old_path));
+                let shown = all.iter().any(|r| r.path.eq_ignore_ascii_case(old_path));
+                report(
+                    &mut lines,
+                    &mut ok,
+                    "store_days_filter",
+                    hidden && shown,
+                    "40 天前的记录：days=30 隐藏 / days=0 可见",
+                );
+
+                // 项目行（2026-10-15）：days 过滤豁免 + view 过滤 + origin 落库
+                let proj = r"C:\__selftest__\a_project";
+                let _ = st.upsert_project(proj, "a_project", "own", Some(old_ts));
+                let recent2 = st.query("", "count", 50, 30, "all").unwrap_or_default();
+                let proj_only = st.query("", "count", 50, 30, "project").unwrap_or_default();
+                let apps_only = st.query("", "count", 50, 30, "app").unwrap_or_default();
+                let p_hit = recent2
+                    .iter()
+                    .find(|r| r.path == proj)
+                    .map(|r| r.origin == "own" && r.source == "project")
+                    .unwrap_or(false);
+                let proj_ok = recent2.iter().any(|r| r.path == proj)
+                    && proj_only.iter().all(|r| r.source == "project")
+                    && !apps_only.iter().any(|r| r.source == "project")
+                    && p_hit;
+                report(
+                    &mut lines,
+                    &mut ok,
+                    "store_project_rows",
+                    proj_ok,
+                    "项目行：days 豁免 / view 过滤 / origin 落库",
+                );
+
+                // 「交给 Agent」接口（2026-10-16）：导出拆 apps/projects + find 命中/无果分支
+                {
+                    let doc = agent::export_doc(&st);
+                    let apps = doc["apps"].as_array().cloned().unwrap_or_default();
+                    let projs = doc["projects"].as_array().cloned().unwrap_or_default();
+                    let split_ok = doc["schemaVersion"].as_i64() == Some(agent::EXPORT_SCHEMA_VERSION)
+                        && !apps.is_empty()
+                        && !apps.iter().any(|r| r["source"] == "project")
+                        && projs.iter().any(|r| r["path"] == proj);
+                    report(
+                        &mut lines,
+                        &mut ok,
+                        "agent_export_split",
+                        split_ok,
+                        &format!("schema v{} · apps={} projects={}", agent::EXPORT_SCHEMA_VERSION, apps.len(), projs.len()),
+                    );
+                }
+                {
+                    let hit = agent::find_doc(&st, "a_project", 20);
+                    let miss = agent::find_doc(&st, "__zz_no_such_tool__", 20);
+                    let hit_ok = hit["projects"]
+                        .as_array()
+                        .map(|a| a.iter().any(|r| r["path"] == proj))
+                        .unwrap_or(false);
+                    let miss_ok = miss["count"].as_i64() == Some(0);
+                    report(
+                        &mut lines,
+                        &mut ok,
+                        "agent_find",
+                        hit_ok && miss_ok,
+                        "命中项目 / 无结果 count=0",
+                    );
+                }
             }
             let _ = st.prune_missing();
         }
@@ -113,6 +189,77 @@ pub fn run() -> bool {
         ),
         None => report(&mut lines, &mut ok, "process_exe_path", false, "读取自身 exe 路径失败"),
     }
+
+    // 「交给 Agent」交接文本：四条契约与调用注意必须在内（内容随本机路径生成）
+    {
+        let g = agent::guide_text();
+        let guide_ok = g.contains("--export")
+            && g.contains("--find")
+            && g.contains("--launch")
+            && g.contains("--make-shortcut");
+        report(&mut lines, &mut ok, "agent_guide", guide_ok, &format!("{} 字符", g.chars().count()));
+    }
+
+    // 运行中判定（列表自动屏蔽运行中应用用）：拿自己的名字去查 → 必须能读出自己在跑的路径
+    {
+        let mut stems = std::collections::HashSet::new();
+        stems.insert("exetrace".to_string());
+        let (paths, _fallback) = winx::running_exe_lookup(&stems);
+        report(
+            &mut lines,
+            &mut ok,
+            "running_lookup",
+            paths.iter().any(|p| p.ends_with("exetrace.exe")),
+            &format!("{} 条运行中路径", paths.len()),
+        );
+    }
+
+    // 项目扫描（2026-10-15）：本机应能扫到仓库；browse_url 必须剥掉 URL 里的凭据
+    {
+        let scan_db = std::env::temp_dir().join(format!("exetrace_rs_proj_{}.db", std::process::id()));
+        match Store::open(&scan_db) {
+            Ok(mut st) => {
+                let stats = crate::projects::scan_all(&mut st);
+                report(
+                    &mut lines,
+                    &mut ok,
+                    "project_scan",
+                    stats.found > 0,
+                    &format!(
+                        "发现 {} 个项目（自有 {} / 克隆 {} / 本地 {}）",
+                        stats.found, stats.own, stats.clone, stats.local
+                    ),
+                );
+            }
+            Err(e) => report(&mut lines, &mut ok, "project_scan", false, &format!("{e}")),
+        }
+        let _ = std::fs::remove_file(&scan_db);
+
+        // 凭据剥离：内嵌 token 的 remote 不得原样返回
+        let fix = std::env::temp_dir().join(format!("exetrace_rs_gitfix_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(fix.join(".git"));
+        let _ = std::fs::write(
+            fix.join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://ghp_FAKEtokenFAKEtoken@github.com/joker1point/demo.git\n",
+        );
+        let url = crate::projects::browse_url(&fix.to_string_lossy()).unwrap_or_default();
+        report(
+            &mut lines,
+            &mut ok,
+            "project_url_strip",
+            url == "https://github.com/joker1point/demo.git",
+            &url,
+        );
+        let _ = std::fs::remove_dir_all(&fix);
+    }
+
+    report(
+        &mut lines,
+        &mut ok,
+        "git_cli",
+        crate::projects::git_available(),
+        "git --version 可执行",
+    );
 
     report(
         &mut lines,

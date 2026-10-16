@@ -108,9 +108,50 @@ def capture(hwnd: int, out_path: str) -> tuple[int, int]:
     return w, h
 
 
+def make_dpi_aware() -> None:
+    """不设 DPI 感知的话：200% 缩放屏上 GetWindowRect 只拿到虚拟化坐标，
+    PrintWindow 会把整窗按 1:1 渲染进半尺寸位图 —— 抓到的是左上角四分之一。"""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE_V2
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 def main() -> int:
+    make_dpi_aware()
     if len(sys.argv) >= 3 and sys.argv[1] == "--pid":
         pid = int(sys.argv[2])
+        if len(sys.argv) >= 4:
+            # 截图模式：截该进程「面积最大的可见顶层窗口」（避开标题编码/同名干扰）
+            out = os.path.abspath(sys.argv[3])
+            wins: list[tuple[int, int]] = []
+
+            def cb(hwnd, _lparam):
+                wpid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                if wpid.value == pid and user32.IsWindowVisible(hwnd):
+                    r = RECT()
+                    user32.GetWindowRect(hwnd, ctypes.byref(r))
+                    area = (r.right - r.left) * (r.bottom - r.top)
+                    wins.append((area, hwnd))
+                return True
+
+            user32.EnumWindows(WNDENUMPROC(cb), 0)
+            if not wins:
+                print(f"PID {pid} 没有可见顶层窗口")
+                return 1
+            wins.sort(reverse=True)
+            hwnd = wins[0][1]
+            n = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            w, h = capture(hwnd, out)
+            print(f"OK: {out}  {w}x{h}\n标题={buf.value!r}")
+            return 0
         print(f"PID {pid} 的全部顶层窗口（含不可见）：")
         for hwnd, vis, t in list_windows(pid, visible_only=False):
             print(f"  {hwnd:#x}  visible={vis}  {t!r}")

@@ -14,9 +14,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    DeleteObject, InvalidateRect, ScreenToClient, UpdateWindow, COLOR_WINDOW, HGDIOBJ, HFONT,
+    CreateFontIndirectW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, GetObjectW,
+    GetStockObject, InvalidateRect, LineTo, LOGFONTW, MoveToEx, RoundRect, ScreenToClient,
+    SelectObject, SetBkMode, SetTextColor, UpdateWindow, COLOR_WINDOW, DT_BOTTOM, DT_END_ELLIPSIS,
+    DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, FW_BOLD, FW_NORMAL, HGDIOBJ, HFONT, NULL_PEN,
+    PS_SOLID, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
@@ -42,6 +46,8 @@ const ID_SEARCH: i32 = 1001;
 const ID_SORT: i32 = 1002;
 const ID_LIST: i32 = 1003;
 const ID_STATUS: i32 = 1004;
+const ID_DAYS: i32 = 1005;
+const ID_VIEW: i32 = 1006;
 
 const ID_BTN_LAUNCH: i32 = 1101;
 const ID_BTN_REVEAL: i32 = 1102;
@@ -60,12 +66,18 @@ const ID_MENU_PIN: i32 = 1205;
 const ID_MENU_PRUNE: i32 = 1206;
 const ID_MENU_PAUSE: i32 = 1207;
 const ID_MENU_HELP: i32 = 1208;
+const ID_MENU_GH: i32 = 1209;
+const ID_MENU_UPDATE: i32 = 1210;
+const ID_MENU_RESCAN: i32 = 1211;
 
 /// 全局热键 ID（Ctrl+Alt+E 呼出主窗口）。
 const HOTKEY_ID: i32 = 9001;
 
 const TIMER_POLL: usize = 1;
 const TIMER_ICONS: usize = 2;
+
+/// 浮层卡片停留时长（秒）。到期由 `tick()`（500ms 一拍）隐藏 —— 够用，不必再开定时器。
+const TOAST_SECS: f64 = 3.4;
 
 /// 自定义消息：窗口显示后按真实 DPI 重建字体/尺寸/布局。
 /// WM_CREATE 阶段窗口还没关联到显示器，GetDpiForWindow 会返回 96。
@@ -77,6 +89,9 @@ const WM_APP_LAUNCH_SELECTED: u32 = WM_APP + 20;
 /// 搜索防抖定时器（150ms 内的连续输入只查一次）。
 const TIMER_SEARCH: usize = 3;
 
+/// 「近 N 天」输入框的防抖定时器（500ms 内连续输入只应用一次）。
+const TIMER_DAYS: usize = 4;
+
 /// `EM_SETSEL`（文本框全选；windows-sys 未导出该消息常量）。
 const EM_SETSEL: u32 = 0x00B1;
 
@@ -84,11 +99,14 @@ const EM_SETSEL: u32 = 0x00B1;
 const HELP_TEXT: &str = "ExeTrace —— 应用历史定位器\n\n\
 【它做什么】\n\
 后台记录你打开过的每一个应用，关掉软件界面后随时能在这里找回它。\n\
-首次启动会扫描系统里的历史痕迹，所以不用等下一次打开就有记录。\n\n\
+正在运行的应用会自动隐藏（它们不需要「找回」，关掉后即恢复显示）。\n\
+首次启动会扫描系统里的历史痕迹，所以不用等下一次打开就有记录。\n\
+本机散落的 git 项目会被扫描成条目（顶部「视图」可切 全部 / 应用 / 项目）；\n\
+项目行：双击打开文件夹，右键可打开主页 / 更新（git pull）。\n\n\
 【常用操作】\n\
-  双击列表项                启动该应用\n\
+  双击列表项                启动该应用（项目 = 打开文件夹）\n\
   右键列表项                启动 / 打开所在文件夹 / 复制路径 / 创建桌面快捷方式 /\n\
-                            从历史中移除 / 清理失效记录 / 暂停记录 / 帮助\n\
+                            打开 GitHub 页 / 更新 / 从历史中移除 / 重新扫描项目 / 帮助\n\
   底部「创建桌面快捷方式」   把选中项钉到桌面（同名自动编号，绝不覆盖）\n\
   底部「钉任意程序…」       选 exe 或软件文件夹 → 自动识别主程序 → 钉到桌面\n\n\
 【快捷键】\n\
@@ -104,8 +122,11 @@ const HELP_TEXT: &str = "ExeTrace —— 应用历史定位器\n\n\
   关闭窗口 = 缩到托盘继续记录；右键托盘图标可退出 / 暂停记录 / 开关自启。\n\
   Win11 默认把托盘图标折叠进「隐藏的图标」，可从那里拖出来固定显示。\n\n\
 【配置】%LOCALAPPDATA%\\ExeTrace\\config.json\n\
-  ignore      忽略列表：不想被记录的 exe 文件名（如 \"spam.exe\"）\n\
-  categories  分类覆盖：给某个 exe 指定分类（如 {\"code.exe\": \"开发\"}）\n\
+  ignore       忽略列表：不想被记录的 exe 文件名（如 \"spam.exe\"）\n\
+  categories   分类覆盖：给某个 exe 指定分类（如 {\"code.exe\": \"开发\"}）\n\
+  history_days 列表默认显示天数：只加载最近 N 天的记录，0 = 全部（默认 30；\n\
+               界面左上角的「近 N 天」输入框会写回这里）\n\
+  project_roots 项目扫描根目录列表（默认扫 文档 / WorkBuddy / 桌面；改完自动生效）\n\
   改完自动生效，无需重启。";
 
 /// `EM_SETCUEBANNER`（编辑框水印；windows-sys 未导出该消息常量）。
@@ -118,15 +139,22 @@ const SORTS: [(&str, &str); 4] = [
     ("名称", "name"),
 ];
 
+/// 「视图」下拉选项：索引 ↔ query 的 view 参数（见 `view_key`）。
+const VIEWS: [&str; 3] = ["全部", "应用", "项目"];
+
+fn view_key(idx: usize) -> &'static str {
+    ["all", "app", "project"][idx.min(2)]
+}
+
 /// 列定义：标题 / 初始宽度（96dpi）/ 对齐（对齐 Python v3.1 的 7 列）。
 const COLS: [(&str, i32, i32); 7] = [
-    ("应用", 250, LVCFMT_LEFT),
-    ("位置", 360, LVCFMT_LEFT),
-    ("分类", 80, LVCFMT_LEFT),
-    ("次数", 56, LVCFMT_RIGHT),
-    ("使用时长", 80, LVCFMT_RIGHT),
-    ("最后打开", 120, LVCFMT_LEFT),
-    ("桌面", 50, LVCFMT_LEFT),
+    ("应用", 240, LVCFMT_LEFT),
+    ("位置", 340, LVCFMT_LEFT),
+    ("分类", 72, LVCFMT_LEFT),
+    ("次数", 52, LVCFMT_RIGHT),
+    ("使用时长", 84, LVCFMT_RIGHT),
+    ("最后打开", 110, LVCFMT_LEFT),
+    ("桌面", 46, LVCFMT_LEFT),
 ];
 
 /// 顶部按钮：控件 ID / 文案 / 宽度（96dpi）。
@@ -148,7 +176,12 @@ struct Ui {
     list: HWND,
     search: HWND,
     sort_box: HWND,
+    days_lbl1: HWND,
+    days_box: HWND,
+    days_lbl2: HWND,
     status: HWND,
+    /// 「视图」下拉：全部 / 应用 / 项目（2026-10-15）。
+    view_box: HWND,
     autostart_box: HWND,
     buttons: Vec<HWND>,
     font: HFONT,
@@ -158,6 +191,12 @@ struct Ui {
     cells: Vec<Vec<Vec<u16>>>,
     rev: u64,
     sort_idx: usize,
+    /// 「近 N 天」过滤（0 = 全部）；启动时取自 config.json 的 history_days。
+    days: i64,
+    /// 视图过滤：0 = 全部，1 = 应用，2 = 项目（顶部「视图」下拉）。
+    view_idx: usize,
+    /// 后台 git / 扫描动作的完成回执：(成功, 名称, 详情)。tick 里取走展示。
+    git_result: Arc<Mutex<Option<(bool, String, String)>>>,
     himl: HIMAGELIST,
     icon_index: HashMap<String, i32>,
     icon_cursor: usize,
@@ -179,8 +218,41 @@ struct Ui {
     quitting: bool,
     event_text: String,
     event_at: f64,
+    /// 钉桌面成功后的**浮层卡片**：子窗口句柄 + 两行文案 + 出现时刻。
+    ///
+    /// 为什么是子窗口而不是在父窗口上直接画：父窗口只靠系统画刷打底、内容全由
+    /// 子控件渲染，直接画出来的东西会被 ListView 盖住。
+    toast: HWND,
+    toast_title: String,
+    toast_body: String,
+    toast_at: f64,
     total: i64,
+    projects: i64,
     today: i64,
+    /// 「已在运行的应用自动屏蔽」判定数据：`run_stems` 是参与判定的应用名集合
+    /// （tick 复核必须与 refresh 同基准，否则集合比较永远不等、每次白刷列表）；
+    /// `run_paths` / `run_names_fallback` 语义见 `winx::running_exe_lookup`。
+    run_stems: std::collections::HashSet<String>,
+    run_paths: std::collections::HashSet<String>,
+    run_names_fallback: std::collections::HashSet<String>,
+    /// 本轮被隐藏的运行中行数（状态栏展示）与上次复核时刻（3s 节流）。
+    hidden_running: usize,
+    run_check_at: f64,
+}
+
+/// 窗口期望尺寸：按 DPI 缩放，但**不超过屏幕工作区**。
+///
+/// 为什么必须设上限（2026-10-09 实测）：本机是 200% 缩放 + 小屏，`1120×740 × 2` 算出来
+/// 是 `2240×1480`，而屏幕只有 `1360×768` —— 窗口比屏幕大近 4 倍，右侧那一大片（正是浮层
+/// 卡片要停的位置）完全在屏幕外，用户根本看不到。高 DPI 的大屏上缩放仍然照常生效。
+fn wanted_size(scale: f32) -> (i32, i32) {
+    unsafe {
+        let sw = GetSystemMetrics(SM_CXSCREEN) as f32;
+        let sh = GetSystemMetrics(SM_CYSCREEN) as f32;
+        let w = (1120.0 * scale).min(sw * 0.92).max(640.0);
+        let h = (740.0 * scale).min(sh * 0.90).max(480.0);
+        (w as i32, h as i32)
+    }
 }
 
 // ------------------------------------------------------------------ 入口
@@ -223,7 +295,11 @@ pub fn run(
             list: std::ptr::null_mut(),
             search: std::ptr::null_mut(),
             sort_box: std::ptr::null_mut(),
+            days_lbl1: std::ptr::null_mut(),
+            days_box: std::ptr::null_mut(),
+            days_lbl2: std::ptr::null_mut(),
             status: std::ptr::null_mut(),
+            view_box: std::ptr::null_mut(),
             autostart_box: std::ptr::null_mut(),
             buttons: Vec::new(),
             font: std::ptr::null_mut(),
@@ -231,6 +307,9 @@ pub fn run(
             cells: Vec::new(),
             rev: 0,
             sort_idx: 0,
+            days: crate::config::current().history_days,
+            view_idx: 0,
+            git_result: Arc::new(Mutex::new(None)),
             himl: 0,
             icon_index: HashMap::new(),
             icon_cursor: 0,
@@ -248,8 +327,18 @@ pub fn run(
             quitting: false,
             event_text: String::new(),
             event_at: 0.0,
+            toast: std::ptr::null_mut(),
+            toast_title: String::new(),
+            toast_body: String::new(),
+            toast_at: 0.0,
             total: 0,
+            projects: 0,
             today: 0,
+            run_stems: std::collections::HashSet::new(),
+            run_paths: std::collections::HashSet::new(),
+            run_names_fallback: std::collections::HashSet::new(),
+            hidden_running: 0,
+            run_check_at: 0.0,
         });
         let state_ptr = Box::into_raw(state);
 
@@ -287,8 +376,8 @@ pub fn run(
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            (1120.0 * s0) as i32,
-            (740.0 * s0) as i32,
+            wanted_size(s0).0,
+            wanted_size(s0).1,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinst,
@@ -311,8 +400,8 @@ pub fn run(
                 std::ptr::null_mut(),
                 0,
                 0,
-                (1120.0 * s) as i32,
-                (740.0 * s) as i32,
+                wanted_size(s).0,
+                wanted_size(s).1,
                 SWP_NOMOVE | SWP_NOZORDER,
             );
         }
@@ -527,8 +616,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let mmi = lparam as *mut MINMAXINFO;
             if !mmi.is_null() {
                 let s = winx::dpi_for_window(hwnd) as f32 / 96.0;
-                (*mmi).ptMinTrackSize.x = (820.0 * s) as i32;
-                (*mmi).ptMinTrackSize.y = (480.0 * s) as i32;
+                // 最小尺寸同样要受屏幕约束：否则小屏 + 高 DPI 下"最小"就已经比屏幕大，
+                // 窗口永远缩不进去（实测 820×480 × 2 = 1640×960 > 1360×768）。
+                let sw = GetSystemMetrics(SM_CXSCREEN) as f32;
+                let sh = GetSystemMetrics(SM_CYSCREEN) as f32;
+                (*mmi).ptMinTrackSize.x = ((820.0 * s) as i32).min((sw * 0.55) as i32).max(520);
+                (*mmi).ptMinTrackSize.y = ((480.0 * s) as i32).min((sh * 0.55) as i32).max(360);
             }
             r
         }
@@ -568,7 +661,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     ShowWindow(hwnd, SW_RESTORE);
                     SetForegroundWindow(hwnd);
                     SetFocus((*ui).search); // 直接聚焦搜索框，呼出即用
+                    refresh(&mut *ui, false); // 隐藏期间的记录变化在这里一次性补上
                 }
+            }
+            0
+        }
+        WM_DRAWITEM => {
+            // 浮层卡片（STATIC + SS_OWNERDRAW）的绘制回调
+            let ui = ctx(hwnd);
+            if ui.is_null() {
+                return 0;
+            }
+            let dis = lparam as *const DRAWITEMSTRUCT;
+            if !dis.is_null() && (*dis).hwndItem == (*ui).toast && !(*ui).toast.is_null() {
+                draw_toast(&*ui, &*dis);
+                return 1;
             }
             0
         }
@@ -585,6 +692,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 // 防抖到期：真正执行搜索
                 KillTimer(hwnd, TIMER_SEARCH);
                 refresh(&mut *ui, false);
+            } else if wparam == TIMER_DAYS {
+                // 「近 N 天」防抖到期：应用输入（校验/持久化/重建见 apply_days_input）
+                KillTimer(hwnd, TIMER_DAYS);
+                apply_days_input(&mut *ui);
             }
             0
         }
@@ -770,6 +881,79 @@ unsafe fn create_children(ui: &mut Ui, hinst: windows_sys::Win32::Foundation::HI
     }
     SendMessageW(ui.sort_box, CB_SETCURSEL, 0, 0);
 
+    // 「视图」下拉：全部 / 应用 / 项目（项目 = 本机 git 仓库扫描结果，2026-10-15）
+    ui.view_box = CreateWindowExW(
+        0,
+        WC_COMBOBOX,
+        empty.as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
+        0,
+        0,
+        0,
+        0,
+        ui.hwnd,
+        ID_VIEW as isize as HMENU,
+        hinst,
+        std::ptr::null_mut(),
+    );
+    set_font(ui.view_box);
+    for label in VIEWS {
+        let l = winx::wide(label);
+        SendMessageW(ui.view_box, CB_ADDSTRING, 0, l.as_ptr() as LPARAM);
+    }
+    SendMessageW(ui.view_box, CB_SETCURSEL, 0, 0);
+
+    // 「近 N 天」过滤：只显示最近 N 天内打开过的记录（0 = 全部）。
+    // 样式用字面量：windows-sys 未导出全部 ES_*/SS_* 常量（ES_CENTER=0x0001 / ES_NUMBER=0x2000 / SS_CENTERIMAGE=0x0200）。
+    let l1 = winx::wide("近");
+    ui.days_lbl1 = CreateWindowExW(
+        0,
+        WC_STATIC,
+        l1.as_ptr(),
+        WS_CHILD | WS_VISIBLE | 0x0200,
+        0,
+        0,
+        0,
+        0,
+        ui.hwnd,
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null_mut(),
+    );
+    set_font(ui.days_lbl1);
+    let days_text = winx::wide(&ui.days.to_string());
+    ui.days_box = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        WC_EDIT,
+        days_text.as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0001 | 0x2000,
+        0,
+        0,
+        0,
+        0,
+        ui.hwnd,
+        ID_DAYS as isize as HMENU,
+        hinst,
+        std::ptr::null_mut(),
+    );
+    set_font(ui.days_box);
+    let l2 = winx::wide("天");
+    ui.days_lbl2 = CreateWindowExW(
+        0,
+        WC_STATIC,
+        l2.as_ptr(),
+        WS_CHILD | WS_VISIBLE | 0x0200,
+        0,
+        0,
+        0,
+        0,
+        ui.hwnd,
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null_mut(),
+    );
+    set_font(ui.days_lbl2);
+
     // ListView（虚拟列表）
     ui.list = CreateWindowExW(
         WS_EX_CLIENTEDGE,
@@ -868,6 +1052,24 @@ unsafe fn create_children(ui: &mut Ui, hinst: windows_sys::Win32::Foundation::HI
     );
     set_font(ui.status);
 
+    // 浮层卡片（钉桌面成功的强反馈）：STATIC + SS_OWNERDRAW，交给父窗口的 WM_DRAWITEM 画。
+    // 初始隐藏，由 show_toast() 显示、tick() 到点隐藏。
+    let toast = CreateWindowExW(
+        0,
+        WC_STATIC,
+        empty.as_ptr(),
+        WS_CHILD | 0x0000_000D, // SS_OWNERDRAW（windows-sys 未导出该常量，直接用值）
+        0,
+        0,
+        0,
+        0,
+        ui.hwnd,
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null_mut(),
+    );
+    ui.toast = toast;
+
     // 按钮默认禁用（未选中行）；清理失效始终可用
     update_selection_ui(ui);
 }
@@ -884,42 +1086,120 @@ unsafe fn layout(ui: &mut Ui) {
     let gap = (6.0 * s) as i32;
     let row_h = (26.0 * s) as i32;
 
-    // 状态栏自己贴底，先让它定好高度
+    // 状态栏自己贴底，先让它定好高度（右格文案含「近 N 天 N 条」，留足宽度）
     SendMessageW(ui.status, WM_SIZE, 0, 0);
     let mut sr: RECT = std::mem::zeroed();
     GetWindowRect(ui.status, &mut sr);
     let sb_h = sr.bottom - sr.top;
-    let mid = (w - (350.0 * s) as i32).max(w / 2);
+    let mid = (w - (450.0 * s) as i32).max(w / 2);
     let parts = [mid, -1i32];
     SendMessageW(ui.status, SB_SETPARTS, 2, parts.as_ptr() as LPARAM);
 
+    // 行 1：搜索框（弹性）＋ 排序 ＋「近 N 天」
+    // （单行工具条在窗口略窄时，右对齐的按钮组会压住搜索框与排序框 —— 2026-10-14 拆两行）
     let top = pad;
-    // 搜索框 + 排序
-    let search_w = (320.0 * s) as i32;
-    MoveWindow(ui.search, pad, top, search_w, row_h, 1);
     let sort_w = (120.0 * s) as i32;
-    MoveWindow(ui.sort_box, pad + search_w + gap, top, sort_w, row_h * 6, 1);
+    let view_w = (86.0 * s) as i32;
+    let lbl1_w = (26.0 * s) as i32;
+    let days_w = (56.0 * s) as i32;
+    let lbl2_w = (20.0 * s) as i32;
+    let fixed1 = sort_w + view_w + lbl1_w + days_w + lbl2_w + gap * 5;
+    let search_w = (w - pad * 2 - fixed1).max((180.0 * s) as i32);
+    let mut x = pad;
+    MoveWindow(ui.search, x, top, search_w, row_h, 1);
+    x += search_w + gap;
+    MoveWindow(ui.view_box, x, top, view_w, row_h * 6, 1);
+    x += view_w + gap;
+    MoveWindow(ui.sort_box, x, top, sort_w, row_h * 6, 1);
+    x += sort_w + gap;
+    MoveWindow(ui.days_lbl1, x, top, lbl1_w, row_h, 1);
+    x += lbl1_w;
+    MoveWindow(ui.days_box, x, top, days_w, row_h, 1);
+    x += days_w;
+    MoveWindow(ui.days_lbl2, x, top, lbl2_w, row_h, 1);
 
-    // 按钮右对齐（先放最右的自启，再倒序放按钮）
-    let mut x = w - pad;
-    let chk_w = (130.0 * s) as i32;
-    x -= chk_w;
-    MoveWindow(ui.autostart_box, x, top, chk_w, row_h, 1);
-    x -= gap * 3;
-    for idx in (0..BUTTONS.len()).rev() {
-        let (_, _, bw) = BUTTONS[idx];
+    // 行 2：操作按钮左对齐 ＋ 开机自启右对齐
+    let row2 = top + row_h + gap;
+    let mut bx = pad;
+    for (idx, (_, _, bw)) in BUTTONS.iter().enumerate() {
         let bw = (bw * s) as i32;
-        x -= bw;
         if let Some(hb) = ui.buttons.get(idx) {
-            MoveWindow(*hb, x, top, bw, row_h, 1);
+            MoveWindow(*hb, bx, row2, bw, row_h, 1);
         }
-        x -= gap;
+        bx += bw + gap;
     }
+    let chk_w = (130.0 * s) as i32;
+    MoveWindow(ui.autostart_box, w - pad - chk_w, row2, chk_w, row_h, 1);
 
-    // 列表填满中间
-    let list_top = top + row_h + pad;
+    // 列表填满中间（列宽按当前客户区重算：「位置」列弹性）
+    let list_top = row2 + row_h + pad;
     let list_h = (h - list_top - sb_h - pad).max(60);
     MoveWindow(ui.list, pad, list_top, (w - pad * 2).max(60), list_h, 1);
+    apply_column_widths(ui);
+
+    // 浮层卡片：跟随窗口尺寸（真正显示前还会再算一次，见 place_toast）
+    place_toast(ui);
+}
+
+/// 按当前 DPI 应用列宽：除「位置」（第 2 列）外按 COLS 的 96dpi 基准缩放，
+/// 「位置」吃掉剩余宽度。必须在真实 DPI 就绪后调用（WM_CREATE 阶段 dpi=96，
+/// 显示后 WM_APP_RELAYOUT 会再走一遍 layout 校正）。
+unsafe fn apply_column_widths(ui: &mut Ui) {
+    if ui.list.is_null() {
+        return;
+    }
+    let s = winx::dpi_for_window(ui.hwnd) as f32 / 96.0;
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(ui.list, &mut rc);
+    let total = (rc.right - rc.left).max(120);
+    let others: i32 = COLS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 1)
+        .map(|(_, (_, w, _))| (*w as f32 * s) as i32)
+        .sum();
+    let path_w = (total - others - 4).max((200.0 * s) as i32);
+    for (i, (_, width, _)) in COLS.iter().enumerate() {
+        let w = if i == 1 { path_w } else { (*width as f32 * s) as i32 };
+        // LVM_SETCOLUMNWIDTH = LVM_FIRST(0x1000) + 30（字面量，避免常量导出差异）
+        SendMessageW(ui.list, 0x101E, i, w as isize as LPARAM);
+    }
+}
+
+/// 把浮层卡片摆到**当前客户区的居中偏上**位置。
+///
+/// 为什么不只在 `layout()` 里算：`layout()` 首次执行发生在 `WM_CREATE` —— 那时窗口
+/// 还是初始尺寸、`GetDpiForWindow` 也还没拿到真实 DPI（代码里那条注释说得很清楚）。
+/// 实测后果：卡片按 100% 尺寸算、并停在旧位置不居中。所以显示前再算一次，保证贴当前窗口。
+unsafe fn place_toast(ui: &Ui) {
+    if ui.toast.is_null() {
+        return;
+    }
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(ui.hwnd, &mut rc);
+    let w = rc.right - rc.left;
+    let s = winx::dpi_for_window(ui.hwnd) as f32 / 96.0;
+    let pad = (8.0 * s) as i32;
+    let cw = ((560.0 * s) as i32).min((w - pad * 2).max(240));
+    let ch = (92.0 * s) as i32;
+    // 贴在**右侧**：列表右端（「桌面」列之后）是一大片没有数据的空白区，
+    // 卡片放那儿既醒目又不遮任何行内容 —— 用户口径：「右侧区域镂空，提示可以集中右侧」。
+    // 不比手工居中：居中依赖客户区宽度的实时值，实测在尺寸变化后会出现"停在旧位置"。
+    let cx = (w - cw - (28.0 * s) as i32).max(pad);
+    let cy = (104.0 * s) as i32; // 顶部工具条之下
+    log::info!(
+        "toast 定位: client_w={w} dpi_s={s:.2} cw={cw} ch={ch} at=({cx},{cy}) title={:?}",
+        ui.toast_title
+    );
+    SetWindowPos(
+        ui.toast,
+        std::ptr::null_mut(),
+        cx,
+        cy,
+        cw,
+        ch,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
 }
 
 /// 窗口显示后按真实 DPI 校正：重建字体、窗口尺寸、图标图集，然后重新布局。
@@ -938,7 +1218,16 @@ unsafe fn relayout_for_dpi(ui: &mut Ui) {
             DeleteObject(ui.font as HGDIOBJ);
         }
         ui.font = new_font;
-        let mut ctrls = vec![ui.search, ui.sort_box, ui.list, ui.status, ui.autostart_box];
+        let mut ctrls = vec![
+            ui.search,
+            ui.sort_box,
+            ui.days_lbl1,
+            ui.days_box,
+            ui.days_lbl2,
+            ui.list,
+            ui.status,
+            ui.autostart_box,
+        ];
         ctrls.extend(ui.buttons.iter().copied());
         for h in ctrls {
             SendMessageW(h, WM_SETFONT, new_font as usize, 1);
@@ -982,13 +1271,30 @@ unsafe fn relayout_for_dpi(ui: &mut Ui) {
 
 // ------------------------------------------------------------------ 数据刷新
 
+/// 分类列文案：项目行显示档位（项目·自有 / 项目·克隆 / 项目·本地）；应用行走既有分类。
+fn row_category(cfg: &crate::config::Config, r: &AppRow) -> String {
+    if r.source == "project" {
+        let tier = match r.origin.as_str() {
+            "own" => "自有",
+            "clone" => "克隆",
+            _ => "本地",
+        };
+        return format!("项目·{tier}");
+    }
+    crate::config::category_override_from(cfg, &r.path)
+        .unwrap_or_else(|| winx::categorize(&r.path).to_string())
+}
+
 unsafe fn refresh(ui: &mut Ui, reset_icons: bool) {
     let keyword = get_window_text(ui.search);
     let sort = SORTS[ui.sort_idx.min(SORTS.len() - 1)].1;
-    let (rows, total, today, rev) = match ui.store.lock() {
+    let days = ui.days;
+    let view = view_key(ui.view_idx);
+    let (rows, total, projects, today, rev) = match ui.store.lock() {
         Ok(st) => (
-            st.query(&keyword, sort, 2000).unwrap_or_default(),
+            st.query(&keyword, sort, 2000, days, view).unwrap_or_default(),
             st.total(),
+            st.total_projects(),
             st.count_today(),
             st.rev(),
         ),
@@ -996,12 +1302,33 @@ unsafe fn refresh(ui: &mut Ui, reset_icons: bool) {
     };
 
     let sel = selected_path(ui);
+
+    // 「找回」工具的口径（2026-10-15）：正在运行的应用不需要找 —— 所有列表视图
+    // （全部 / 近 N 天 / 搜索结果）统一隐藏。判定数据存进 ui，tick 里以同一
+    // 基准（run_stems）做 3 秒节流复核，应用开/关后该藏该现跟着变。
+    let run_stems: std::collections::HashSet<String> =
+        rows.iter().map(|r| r.name.to_lowercase()).collect();
+    let (run_paths, run_names_fallback) = winx::running_exe_lookup(&run_stems);
+    let mut rows = rows;
+    let before = rows.len();
+    rows.retain(|r| {
+        !run_paths.contains(&r.path.to_lowercase())
+            && !run_names_fallback.contains(&r.name.to_lowercase())
+    });
+    ui.hidden_running = before - rows.len();
+    ui.run_stems = run_stems;
+    ui.run_paths = run_paths;
+    ui.run_names_fallback = run_names_fallback;
+
     ui.rows = rows;
     ui.total = total;
+    ui.projects = projects;
     ui.today = today;
     ui.rev = rev;
 
     // 重建单元格文本缓冲（指针要在 LVN_GETDISPINFO 返回后仍有效 → 按行持有）
+    // 分类覆盖整份取一次：category_override 会克隆整份 config，逐行调用纯属浪费。
+    let cfg = crate::config::current();
     ui.cells = ui
         .rows
         .iter()
@@ -1014,10 +1341,7 @@ unsafe fn refresh(ui: &mut Ui, reset_icons: bool) {
             vec![
                 winx::wide(&r.name),
                 winx::wide(&r.path),
-                winx::wide(
-                    &crate::config::category_override(&r.path)
-                        .unwrap_or_else(|| winx::categorize(&r.path).to_string()),
-                ),
+                winx::wide(&row_category(&cfg, r)),
                 winx::wide(&count),
                 winx::wide(&winx::human_duration(r.total_seconds)),
                 winx::wide(&human_time(r.last_seen)),
@@ -1048,11 +1372,47 @@ unsafe fn refresh(ui: &mut Ui, reset_icons: bool) {
     update_status(ui);
 }
 
+/// 「近 N 天」输入应用：解析失败（空/非法）回填当前值、不改变过滤；
+/// 成功则夹取范围、持久化到 config.json 并重建列表（reset_icons：新行可能没图标）。
+unsafe fn apply_days_input(ui: &mut Ui) {
+    let text = get_window_text(ui.days_box);
+    match text.trim().parse::<i64>() {
+        Ok(n) => {
+            let n = n.clamp(0, 3650);
+            if n != ui.days {
+                ui.days = n;
+                crate::config::save_history_days(n);
+                refresh(ui, true);
+            }
+        }
+        Err(_) => {
+            let cur = winx::wide(&ui.days.to_string());
+            SetWindowTextW(ui.days_box, cur.as_ptr());
+        }
+    }
+}
+
 unsafe fn tick(ui: &mut Ui) {
-    // 1) 数据版本变化才重查
+    // 1) 数据版本变化才重查；窗口不可见或最小化时跳过列表重建（隐藏期间每 30s
+    //    的全量重建纯属白干），呼出/还原路径会立即补一次刷新。
     let rev = ui.store.lock().map(|s| s.rev()).unwrap_or(ui.rev);
-    if rev != ui.rev {
+    if rev != ui.rev && IsWindowVisible(ui.hwnd) != 0 && IsIconic(ui.hwnd) == 0 {
         refresh(ui, false);
+    }
+
+    // 1b) 「运行中屏蔽」复核（3s 节流，窗口可见时才做）：应用开/关后，列表里
+    //     该藏的行 / 该现的行要跟上。基准必须与 refresh 一致（ui.run_stems），
+    //     只有判定结果真的变了才重建列表 —— 否则会每 3 秒白刷一次。
+    if IsWindowVisible(ui.hwnd) != 0
+        && IsIconic(ui.hwnd) == 0
+        && !ui.run_stems.is_empty()
+        && store::unix_now() - ui.run_check_at > 3.0
+    {
+        ui.run_check_at = store::unix_now();
+        let (paths, fallback) = winx::running_exe_lookup(&ui.run_stems);
+        if paths != ui.run_paths || fallback != ui.run_names_fallback {
+            refresh(ui, false);
+        }
     }
 
     // 2) 托盘事件：先取走本轮到的事件（结束对 ui.tray_rx 的借用，再动 ui 的其他字段）
@@ -1069,6 +1429,7 @@ unsafe fn tick(ui: &mut Ui) {
                 ShowWindow(ui.hwnd, SW_SHOW);
                 ShowWindow(ui.hwnd, SW_RESTORE);
                 SetForegroundWindow(ui.hwnd);
+                refresh(ui, false); // 隐藏期间的记录变化在这里一次性补上
             }
             winx::TrayEvent::ToggleAutostart => {
                 let cur = ui.autostart.load(Ordering::Relaxed);
@@ -1101,10 +1462,38 @@ unsafe fn tick(ui: &mut Ui) {
         set_event(ui, &format!("刚刚打开：{name}"));
     }
 
+    // 3b) 后台 git / 扫描动作的回执：成功一行提示，失败弹详情（2026-10-15）
+    let git_done = ui.git_result.lock().ok().and_then(|mut g| g.take());
+    if let Some((ok, name, detail)) = git_done {
+        if ok {
+            let latest = detail.contains("Already up to date")
+                || detail.contains("Already up-to-date")
+                || detail.contains("已经是最新");
+            let msg = if name.is_empty() {
+                detail
+            } else if latest {
+                format!("已是最新：{name}")
+            } else {
+                format!("已更新：{name}")
+            };
+            set_event(ui, &msg);
+            refresh(ui, false);
+        } else {
+            set_event(ui, &format!("操作失败：{name}"));
+            winx::message_box_on(ui.hwnd, &format!("{name}：\n{detail}"));
+        }
+    }
+
     // 4) 事件文本 8 秒后恢复默认
     if !ui.event_text.is_empty() && store::unix_now() - ui.event_at > 8.0 {
         ui.event_text.clear();
         update_status(ui);
+    }
+
+    // 4b) 浮层卡片到点隐藏（500ms 一拍的粒度够）
+    if !ui.toast.is_null() && ui.toast_at > 0.0 && store::unix_now() - ui.toast_at > TOAST_SECS {
+        ShowWindow(ui.toast, SW_HIDE);
+        ui.toast_at = 0.0;
     }
 
     // 5) 启动 6 秒后回收一次工作集：把首启扫描 + 首屏图标加载的峰值页
@@ -1204,6 +1593,24 @@ unsafe fn on_command(ui: &mut Ui, wparam: WPARAM) {
                     ui.sort_idx = i as usize;
                     refresh(ui, false);
                 }
+            }
+        }
+        ID_VIEW => {
+            if code == CBN_SELCHANGE {
+                let i = SendMessageW(ui.view_box, CB_GETCURSEL, 0, 0);
+                if i >= 0 {
+                    let idx = i as usize;
+                    if idx != ui.view_idx {
+                        ui.view_idx = idx;
+                        refresh(ui, true);
+                    }
+                }
+            }
+        }
+        ID_DAYS => {
+            if code == EN_CHANGE {
+                // 防抖：连续输入时只应用一次（应用逻辑见 apply_days_input）
+                SetTimer(ui.hwnd, TIMER_DAYS, 500, None);
             }
         }
         ID_BTN_LAUNCH => {
@@ -1317,6 +1724,55 @@ unsafe fn dispatch_menu_action(ui: &mut Ui, id: i32) {
             set_event(ui, &msg);
             refresh(ui, false);
         }
+        ID_MENU_GH => {
+            if let Some(p) = selected_path(ui) {
+                match crate::projects::browse_url(&p) {
+                    Some(url) => {
+                        winx::launch_path(&url);
+                        set_event(ui, "已在浏览器打开项目主页");
+                    }
+                    None => winx::message_box_on(
+                        ui.hwnd,
+                        "这个项目没有可打开的远程页面（未配 remote，或不是 GitHub / Gitee 地址）。",
+                    ),
+                }
+            }
+        }
+        ID_MENU_UPDATE => {
+            if let Some(p) = selected_path(ui) {
+                let name = store::file_stem(&p);
+                let slot = ui.git_result.clone();
+                std::thread::spawn(move || {
+                    let (ok, detail) = crate::projects::git_pull(&p);
+                    if let Ok(mut g) = slot.lock() {
+                        *g = Some((ok, name, detail));
+                    }
+                });
+                set_event(ui, "正在更新…（git pull）");
+            }
+        }
+        ID_MENU_RESCAN => {
+            let slot = ui.git_result.clone();
+            let st = ui.store.clone();
+            std::thread::spawn(move || {
+                let stats = st.lock().map(|mut s| crate::projects::scan_all(&mut s));
+                let (ok, name, detail) = match stats {
+                    Ok(s) => (
+                        true,
+                        String::new(),
+                        format!(
+                            "项目扫描完成：发现 {} 个（自有 {} / 克隆 {} / 本地 {}）",
+                            s.found, s.own, s.clone, s.local
+                        ),
+                    ),
+                    Err(_) => (false, "项目扫描".to_string(), "存储被占用，扫描未执行".to_string()),
+                };
+                if let Ok(mut g) = slot.lock() {
+                    *g = Some((ok, name, detail));
+                }
+            });
+            set_event(ui, "正在扫描本机项目…");
+        }
         ID_MENU_PAUSE => toggle_pause(ui),
         ID_MENU_HELP => show_help(ui.hwnd),
         _ => {}
@@ -1334,9 +1790,195 @@ unsafe fn toggle_pause(ui: &mut Ui) {
     update_status(ui);
 }
 
-/// 把某个路径钉到桌面：创建 + 立刻读回校验 + 标记「桌面」列。
+// 浮层卡片配色（COLORREF 是 0x00BBGGRR）。
+const TOAST_BG: COLORREF = 0x00F7FBF5; // 极浅绿
+const TOAST_LINE: COLORREF = 0x0050AF4C; // 绿（和「桌面」列的勾同一套语义）
+const TOAST_TITLE_COLOR: COLORREF = 0x00182818;
+const TOAST_BODY_COLOR: COLORREF = 0x00606060;
+
+/// 从系统 UI 字体派生一个变体（只改字号 / 粗细）—— 不硬编码字体名，
+/// 中文与高 DPI 都跟系统走（与 `winx::system_ui_font` 同一思路）。
+unsafe fn derive_font(base: HFONT, height: i32, bold: bool) -> HFONT {
+    if base.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut lf: LOGFONTW = std::mem::zeroed();
+    let got = GetObjectW(
+        base as HGDIOBJ,
+        std::mem::size_of::<LOGFONTW>() as i32,
+        &mut lf as *mut LOGFONTW as *mut c_void,
+    );
+    if got == 0 {
+        return std::ptr::null_mut();
+    }
+    lf.lfHeight = -height; // 负值 = 字符高度（不含内部行距）
+    lf.lfWeight = (if bold { FW_BOLD } else { FW_NORMAL }) as i32;
+    CreateFontIndirectW(&lf)
+}
+
+/// 画浮层卡片（STATIC + SS_OWNERDRAW → 父窗口的 WM_DRAWITEM 里回调）。
+unsafe fn draw_toast(ui: &Ui, dis: &DRAWITEMSTRUCT) {
+    let hdc = dis.hDC;
+    let rc = dis.rcItem;
+    let s = winx::dpi_for_window(ui.hwnd) as f32 / 96.0;
+    let pad = (16.0 * s) as i32;
+
+    // 1) 卡片底：浅绿圆角 + 绿描边
+    let bg = CreateSolidBrush(TOAST_BG);
+    let line = CreatePen(PS_SOLID, (1.4 * s).max(1.0) as i32, TOAST_LINE);
+    let old_brush = SelectObject(hdc, bg as HGDIOBJ);
+    let old_pen = SelectObject(hdc, line as HGDIOBJ);
+    let rad = (16.0 * s) as i32;
+    RoundRect(hdc, rc.left, rc.top, rc.right - 1, rc.bottom - 1, rad, rad);
+
+    // 2) 左侧绿圆 + 白勾（画线而不是字体符号：不依赖字体里有没有 ✓）
+    let d = (38.0 * s) as i32;
+    let cx = rc.left + pad + d / 2;
+    let cy = (rc.top + rc.bottom) / 2;
+    let green = CreateSolidBrush(TOAST_LINE);
+    SelectObject(hdc, green as HGDIOBJ);
+    SelectObject(hdc, GetStockObject(NULL_PEN));
+    Ellipse(hdc, cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2);
+
+    let white = CreatePen(PS_SOLID, (2.6 * s).max(2.0) as i32, 0x00FFFFFF);
+    SelectObject(hdc, white as HGDIOBJ);
+    let q = d / 4;
+    MoveToEx(hdc, cx - q, cy, std::ptr::null_mut());
+    LineTo(hdc, cx - q / 3, cy + q);
+    LineTo(hdc, cx + q + q / 3, cy - q);
+
+    // 3) 文案：主行（粗）+ 副行（文件 ── 方位）
+    SetBkMode(hdc, TRANSPARENT as i32);
+    let tx = cx + d / 2 + (12.0 * s) as i32;
+
+    // 两行一次画完（`\n` 分隔、不传 DT_SINGLELINE 即多行）：
+    // 之前分成两次调用时，只有第二行显示出来 —— 单次调用把"分区/裁剪"这类变量全消掉。
+    let mut text = ui.toast_title.clone();
+    text.push('\n');
+    text.push_str(&ui.toast_body);
+    let tb = winx::wide(&text);
+    let f_body = derive_font(ui.font, (14.0 * s) as i32, false);
+    let old_font = SelectObject(hdc, f_body as HGDIOBJ);
+    SetTextColor(hdc, TOAST_TITLE_COLOR);
+    let mut rb = RECT {
+        left: tx,
+        top: rc.top + pad,
+        right: rc.right - pad,
+        bottom: rc.bottom - pad,
+    };
+    let drawn = DrawTextW(
+        hdc,
+        tb.as_ptr(),
+        -1,
+        &mut rb,
+        DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS,
+    );
+    log::info!(
+        "toast 文案绘制: rc=({},{},{},{}) 字体空={} 返回高={drawn}",
+        rb.left,
+        rb.top,
+        rb.right,
+        rb.bottom,
+        f_body.is_null()
+    );
+    SelectObject(hdc, old_font);
+    if !f_body.is_null() {
+        DeleteObject(f_body as HGDIOBJ);
+    }
+
+    // 4) 还原并释放 GDI 对象（顺序：先还原再删，避免用着已删的句柄）
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    DeleteObject(bg as HGDIOBJ);
+    DeleteObject(line as HGDIOBJ);
+    DeleteObject(green as HGDIOBJ);
+    DeleteObject(white as HGDIOBJ);
+}
+
+/// 弹出浮层卡片（钉桌面成功的强反馈）。`beep=true` 时附一声系统提示音。
+///
+/// 允许被调用两次：第一次在按钮回调里立即弹（不含方位），拿到方位后再刷一次文字 ——
+/// 这样"瞬间反馈"与"方位需要等 Explorer 刷新"两件事不用互相迁就。
+unsafe fn show_toast(ui: &mut Ui, title: &str, body: &str, beep: bool) {
+    ui.toast_title = title.to_string();
+    ui.toast_body = body.to_string();
+    ui.toast_at = store::unix_now();
+    if ui.toast.is_null() {
+        return;
+    }
+    place_toast(ui); // 先按当前窗口定好位，再显示
+    SetWindowPos(
+        ui.toast,
+        HWND_TOP,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+    InvalidateRect(ui.toast, std::ptr::null(), 1);
+    if beep {
+        success_beep();
+    }
+}
+
+/// 成功提示音。
+///
+/// windows-sys 0.61 没有导出 `MessageBeep`（源码里搜不到），所以从 user32 动态取一次：
+/// user32 本来就在本进程里，`GetProcAddress` 只是一次符号查找，无额外依赖、无体积代价。
+fn success_beep() {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    unsafe {
+        let dll = winx::wide("user32.dll");
+        let hmod = GetModuleHandleW(dll.as_ptr());
+        if hmod.is_null() {
+            return;
+        }
+        let sym = b"MessageBeep\0";
+        if let Some(f) = GetProcAddress(hmod, sym.as_ptr()) {
+            let beep: unsafe extern "system" fn(u32) -> i32 = std::mem::transmute(f);
+            beep(0x0000_0040); // MB_ICONASTERISK：系统星号提示音，不引音频资源
+        }
+    }
+}
+
+/// 钉完之后再读一次桌面图标坐标，找出"多出来的那个" → 它在桌面哪个方位（八区）。
+///
+/// 为什么用"快照 diff"而不是按序号推算：桌面图标会重排（自动排列会填到第一个空位），
+/// 且很容易超出一屏 —— 实测本机 91 个图标、一屏只放得下 36 个。diff 只依赖"谁是新来的"。
+/// 读不到坐标（拿不到 ListView / 权限不足 / Explorer 忙）时返回 None，调用方退化为不提方位。
+fn new_icon_zone(before: Option<&[(i32, i32)]>) -> Option<&'static str> {
+    // 必须重试：Explorer 刷新桌面图标列表有延迟，快捷方式落盘后**立刻**读往往还是旧列表
+    // （数量没变 → diff 为空 → 只能退化成"落在桌面图标区"）。实测加到这里才拿到方位。
+    // 总等待 ≈ 0.6s，用户刚点完按钮，这段短暂停顿无感；真要更久就该改成异步补写了。
+    for attempt in 0..4 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let Some(after) = winx::desktop_icon_positions() else {
+            continue;
+        };
+        let fresh = match before {
+            Some(old) if after.len() > old.len() => {
+                let old_set: std::collections::HashSet<(i32, i32)> = old.iter().copied().collect();
+                after.iter().copied().find(|p| !old_set.contains(p))
+            }
+            // 建前快照失败：退一步用最后一个（刚加进去的通常排在那里）
+            None => after.last().copied(),
+            _ => None,
+        };
+        if let Some(p) = fresh {
+            return Some(winx::zone_of(p.0, p.1, winx::primary_work_area()));
+        }
+    }
+    None
+}
+
+/// 把某个路径钉到桌面：创建 + 立刻读回校验 + 标记「桌面」列 + 强反馈（卡片 + 方位）。
 unsafe fn act_pin(ui: &mut Ui, target: &str) {
     let name = store::file_stem(target);
+    // 建前快照：给"新图标落哪儿"留基线
+    let before = winx::desktop_icon_positions();
     match shortcut::pin_to_desktop(target, &name) {
         Ok((lnk, verified)) => {
             if let Ok(mut st) = ui.store.lock() {
@@ -1349,6 +1991,16 @@ unsafe fn act_pin(ui: &mut Ui, target: &str) {
             let suffix = if verified { "（已校验）" } else { "（读回不一致）" };
             set_event(ui, &format!("已创建桌面快捷方式：{base}{suffix}"));
             refresh(ui, false);
+
+            // 强反馈：先**立即**弹卡片（含提示音），再补方位 ——
+            // 方位要等 Explorer 刷新图标列表（最多重试 ~0.6s），不值得让"瞬间反馈"等它。
+            let head = format!("{base}{suffix}");
+            show_toast(ui, "已创建桌面快捷方式", &head, true);
+            let body = match new_icon_zone(before.as_deref()) {
+                Some(zone) => format!("{head} · 在桌面{zone}"),
+                None => format!("{head} · 落在桌面图标区"),
+            };
+            show_toast(ui, "已创建桌面快捷方式", &body, false);
         }
         Err(e) => {
             log::warn!("钉桌面失败: {e}");
@@ -1457,39 +2109,68 @@ unsafe fn pick_file_dialog() -> Option<String> {
 }
 
 unsafe fn act_launch(ui: &mut Ui, path: &str) {
-    if std::path::Path::new(path).is_file() {
+    let p = std::path::Path::new(path);
+    if p.is_file() {
         winx::launch_path(path);
         let name = store::file_stem(path);
         set_event(ui, &format!("已启动：{name}"));
+    } else if p.is_dir() {
+        // 项目行：双击 = 打开项目文件夹（「管理项目入口」的基本动作）
+        winx::launch_path(path);
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
+        set_event(ui, &format!("已打开：{name}"));
     } else {
         winx::message_box_on(ui.hwnd, &format!("文件已不存在：\n{path}"));
     }
 }
 
 unsafe fn show_context_menu(ui: &mut Ui) {
-    if selected_path(ui).is_none() {
-        return;
-    }
+    let Some(selected) = selected_path(ui) else { return };
+    let is_project = ui
+        .rows
+        .iter()
+        .find(|r| r.path == selected)
+        .map(|r| r.source == "project")
+        .unwrap_or(false);
     let hmenu = CreatePopupMenu();
     if hmenu.is_null() {
         return;
     }
     let paused_now = ui.paused.load(Ordering::Relaxed);
-    let items = [
-        (ID_MENU_LAUNCH, "启动".to_string()),
-        (ID_MENU_REVEAL, "打开所在文件夹".to_string()),
-        (ID_MENU_COPY, "复制完整路径".to_string()),
-        (ID_MENU_PIN, "创建桌面快捷方式".to_string()),
-        (ID_MENU_REMOVE, "从历史中移除".to_string()),
-        (ID_MENU_PRUNE, "清理失效记录".to_string()),
-        (
-            ID_MENU_PAUSE,
-            if paused_now { "恢复记录".to_string() } else { "暂停记录".to_string() },
-        ),
-        (ID_MENU_HELP, "帮助 (F1)".to_string()),
-    ];
-    for (i, (id, label)) in items.iter().enumerate() {
-        if i == 4 {
+    let pause_label = if paused_now { "恢复记录" } else { "暂停记录" };
+    // (id, 文案, 是否在该项前加分隔线)
+    let items: Vec<(i32, String, bool)> = if is_project {
+        vec![
+            (ID_MENU_LAUNCH, "打开文件夹".to_string(), false),
+            (ID_MENU_REVEAL, "打开所在文件夹".to_string(), false),
+            (ID_MENU_COPY, "复制完整路径".to_string(), false),
+            (ID_MENU_PIN, "创建桌面快捷方式".to_string(), false),
+            (ID_MENU_GH, "打开 GitHub 页".to_string(), true),
+            (ID_MENU_UPDATE, "更新（git pull）".to_string(), false),
+            (ID_MENU_REMOVE, "从历史中移除".to_string(), true),
+            (ID_MENU_PRUNE, "清理失效记录".to_string(), false),
+            (ID_MENU_RESCAN, "重新扫描项目".to_string(), false),
+            (ID_MENU_PAUSE, pause_label.to_string(), true),
+            (ID_MENU_HELP, "帮助 (F1)".to_string(), false),
+        ]
+    } else {
+        vec![
+            (ID_MENU_LAUNCH, "启动".to_string(), false),
+            (ID_MENU_REVEAL, "打开所在文件夹".to_string(), false),
+            (ID_MENU_COPY, "复制完整路径".to_string(), false),
+            (ID_MENU_PIN, "创建桌面快捷方式".to_string(), false),
+            (ID_MENU_REMOVE, "从历史中移除".to_string(), true),
+            (ID_MENU_PRUNE, "清理失效记录".to_string(), false),
+            (ID_MENU_RESCAN, "重新扫描项目".to_string(), false),
+            (ID_MENU_PAUSE, pause_label.to_string(), true),
+            (ID_MENU_HELP, "帮助 (F1)".to_string(), false),
+        ]
+    };
+    for (id, label, sep) in &items {
+        if *sep {
             AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
         }
         let l = winx::wide(label);
@@ -1580,11 +2261,40 @@ unsafe fn update_status(ui: &mut Ui) {
         "还没有记录 —— 打开任意软件后它会出现在这里；也可以点「钉任意程序…」直接钉到桌面"
             .to_string()
     } else if ui.rows.is_empty() {
-        "没有匹配的应用（清空搜索框可看全部）".to_string()
+        if ui.hidden_running > 0 {
+            format!(
+                "没有可显示的应用 —— {} 个正在运行的应用已自动隐藏（关掉它们即恢复）",
+                ui.hidden_running
+            )
+        } else if ui.view_idx == 2 {
+            "没有扫描到项目 —— 右键菜单里可以「重新扫描项目」".to_string()
+        } else {
+            "没有匹配的应用（清空搜索框可看全部）".to_string()
+        }
     } else {
         "后台记录中（关闭窗口 = 缩到托盘继续记录 · F1 查看帮助）".to_string()
     };
-    let right = format!("已收录 {} 个应用 · 今日打开 {}", ui.total, ui.today);
+    let hidden_note = if ui.hidden_running > 0 {
+        format!(" · 已隐藏 {} 个运行中", ui.hidden_running)
+    } else {
+        String::new()
+    };
+    let right = if ui.days > 0 {
+        format!(
+            "已收录 {} 个应用 / {} 个项目 · 近 {} 天 {} 条{} · 今日打开 {}",
+            ui.total,
+            ui.projects,
+            ui.days,
+            ui.rows.len(),
+            hidden_note,
+            ui.today
+        )
+    } else {
+        format!(
+            "已收录 {} 个应用 / {} 个项目{} · 今日打开 {}",
+            ui.total, ui.projects, hidden_note, ui.today
+        )
+    };
     set_status_text(ui.status, 0, &left);
     set_status_text(ui.status, 1, &right);
 }

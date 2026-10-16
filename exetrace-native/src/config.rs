@@ -20,11 +20,27 @@ use std::time::SystemTime;
 
 use crate::paths;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub ignore: Vec<String>,
     pub categories: HashMap<String, String>,
+    /// 历史列表默认显示的天数（0 = 全部）。界面上的「近 N 天」会写回 config.json。
+    pub history_days: i64,
+    /// 项目扫描的根目录（空 = 用 projects.rs 的内置默认：Documents / WorkBuddy / Desktop）。
+    pub project_roots: Vec<String>,
     pub mtime: Option<SystemTime>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            ignore: Vec::new(),
+            categories: HashMap::new(),
+            history_days: 30,
+            project_roots: Vec::new(),
+            mtime: None,
+        }
+    }
 }
 
 static CURRENT: RwLock<Option<Config>> = RwLock::new(None);
@@ -57,6 +73,19 @@ fn parse(text: &str) -> Config {
                 let name = s.trim();
                 if !name.is_empty() {
                     cfg.categories.insert(key.trim().to_lowercase(), name.to_string());
+                }
+            }
+        }
+    }
+    if let Some(v) = value.get("history_days").and_then(|x| x.as_i64()) {
+        cfg.history_days = v.clamp(0, 3650);
+    }
+    if let Some(arr) = value.get("project_roots").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                let t = s.trim();
+                if !t.is_empty() {
+                    cfg.project_roots.push(t.to_string());
                 }
             }
         }
@@ -120,9 +149,30 @@ pub fn should_ignore(exe_path: &str) -> bool {
         .any(|k| hay.contains(k.as_str()) || base == *k)
 }
 
-/// 分类覆盖（按 exe 文件名小写精确匹配）。
-pub fn category_override(exe_path: &str) -> Option<String> {
-    let cfg = current();
+/// 写回 history_days（保留文件里的其它字段；临时文件 + 改名原子替换）。
+pub fn save_history_days(days: i64) {
+    let path = config_path();
+    let mut value: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .map(|t| t.trim_start_matches('\u{feff}').to_string())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !value.is_object() {
+        value = serde_json::json!({});
+    }
+    value["history_days"] = serde_json::json!(days.clamp(0, 3650));
+    if let Ok(text) = serde_json::to_string_pretty(&value) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+    load_force(); // 同步内存缓存 + mtime（watcher 的热重载下一次读到的是同一份）
+}
+
+/// 分类覆盖（按 exe 文件名小写精确匹配）：调用方先取一次配置传进来，
+/// 避免逐行克隆整份配置（refresh 每帧只取一次）。
+pub fn category_override_from(cfg: &Config, exe_path: &str) -> Option<String> {
     if cfg.categories.is_empty() {
         return None;
     }
