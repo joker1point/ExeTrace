@@ -69,6 +69,7 @@ const ID_MENU_HELP: i32 = 1208;
 const ID_MENU_GH: i32 = 1209;
 const ID_MENU_UPDATE: i32 = 1210;
 const ID_MENU_RESCAN: i32 = 1211;
+const ID_MENU_WHITELIST: i32 = 1212;
 
 /// 全局热键 ID（Ctrl+Alt+E 呼出主窗口）。
 const HOTKEY_ID: i32 = 9001;
@@ -106,7 +107,8 @@ const HELP_TEXT: &str = "ExeTrace —— 应用历史定位器\n\n\
 【常用操作】\n\
   双击列表项                启动该应用（项目 = 打开文件夹）\n\
   右键列表项                启动 / 打开所在文件夹 / 复制路径 / 创建桌面快捷方式 /\n\
-                            打开 GitHub 页 / 更新 / 从历史中移除 / 重新扫描项目 / 帮助\n\
+                            加入 memfuse 白名单 / 打开 GitHub 页 / 更新 / 从历史中移除 /\n\
+                            重新扫描项目 / 帮助\n\
   底部「创建桌面快捷方式」   把选中项钉到桌面（同名自动编号，绝不覆盖）\n\
   底部「钉任意程序…」       选 exe 或软件文件夹 → 自动识别主程序 → 钉到桌面\n\n\
 【快捷键】\n\
@@ -127,6 +129,8 @@ const HELP_TEXT: &str = "ExeTrace —— 应用历史定位器\n\n\
   history_days 列表默认显示天数：只加载最近 N 天的记录，0 = 全部（默认 30；\n\
                界面左上角的「近 N 天」输入框会写回这里）\n\
   project_roots 项目扫描根目录列表（默认扫 文档 / WorkBuddy / 桌面；改完自动生效）\n\
+  memfuse_script memfuse 主脚本路径（右键「加入 memfuse 白名单」用；空 = 自动探测，\n\
+               也可以用环境变量 MEMFUSE_SCRIPT 指定）\n\
   改完自动生效，无需重启。";
 
 /// `EM_SETCUEBANNER`（编辑框水印；windows-sys 未导出该消息常量）。
@@ -199,6 +203,8 @@ struct Ui {
     view_idx: usize,
     /// 后台 git / 扫描动作的完成回执：(成功, 名称, 详情)。tick 里取走展示。
     git_result: Arc<Mutex<Option<(bool, String, String)>>>,
+    /// memfuse 白名单动作的完成回执：(成功, 应用名, 详情)。tick 里取走展示。
+    memfuse_result: Arc<Mutex<Option<(bool, String, String)>>>,
     himl: HIMAGELIST,
     icon_index: HashMap<String, i32>,
     icon_cursor: usize,
@@ -312,6 +318,7 @@ pub fn run(
             days: crate::config::current().history_days,
             view_idx: 0,
             git_result: Arc::new(Mutex::new(None)),
+            memfuse_result: Arc::new(Mutex::new(None)),
             himl: 0,
             icon_index: HashMap::new(),
             icon_cursor: 0,
@@ -1486,6 +1493,23 @@ unsafe fn tick(ui: &mut Ui) {
         }
     }
 
+    // 3c) memfuse 白名单动作的回执：成功弹绿卡 + 一行状态，失败弹详情（2026-10-16）
+    let mf_done = ui.memfuse_result.lock().ok().and_then(|mut g| g.take());
+    if let Some((ok, name, detail)) = mf_done {
+        if ok {
+            set_event(ui, &format!("已加入 memfuse 白名单：{name}（立即生效）"));
+            show_toast(
+                ui,
+                "已加入 memfuse 白名单",
+                &format!("{name} —— 内存紧张时不会再被杀"),
+                false,
+            );
+        } else {
+            set_event(ui, &format!("加白名单失败：{name}"));
+            winx::message_box_on(ui.hwnd, &format!("{name}：\n{detail}"));
+        }
+    }
+
     // 4) 事件文本 8 秒后恢复默认
     if !ui.event_text.is_empty() && store::unix_now() - ui.event_at > 8.0 {
         ui.event_text.clear();
@@ -1775,10 +1799,50 @@ unsafe fn dispatch_menu_action(ui: &mut Ui, id: i32) {
             });
             set_event(ui, "正在扫描本机项目…");
         }
+        ID_MENU_WHITELIST => {
+            if let Some(p) = selected_path(ui) {
+                act_whitelist(ui, &p);
+            }
+        }
         ID_MENU_PAUSE => toggle_pause(ui),
         ID_MENU_HELP => show_help(ui.hwnd),
         _ => {}
     }
+}
+
+/// 把这一行对应的进程名加进 memfuse 的 `protect-list.txt`（后台线程 + 回执）。
+///
+/// 场景（2026-10-16 用户口径）：内存紧张时应用**一开就被 memfuse 杀掉**，根本来不及
+/// 打开白名单界面 —— 但它的历史记录一直在这张列表里，所以这里右键是最快的入口。
+/// 动作放后台线程跑（要起一次 PowerShell，约 0.5-1.5 秒，不能堵 UI）。
+unsafe fn act_whitelist(ui: &mut Ui, path: &str) {
+    let name = store::file_stem(path);
+    if name.is_empty() {
+        return;
+    }
+    let Some(script) = crate::memfuse::resolve_script() else {
+        winx::message_box_on(
+            ui.hwnd,
+            "没找到 memfuse 的 memory-guard.ps1。\n\n\
+             在 config.json 里加一行指向它：\n  \
+             \"memfuse_script\": \"C:\\\\...\\\\memfuse\\\\memory-guard.ps1\"\n\
+             （也可以用环境变量 MEMFUSE_SCRIPT）",
+        );
+        return;
+    };
+    if crate::memfuse::is_listed(&script, &name) {
+        set_event(ui, &format!("已在白名单里：{name}"));
+        return;
+    }
+    let slot = ui.memfuse_result.clone();
+    let target = name.clone();
+    std::thread::spawn(move || {
+        let (ok, detail) = crate::memfuse::add_to_protect_list(&script, &target);
+        if let Ok(mut g) = slot.lock() {
+            *g = Some((ok, target, detail));
+        }
+    });
+    set_event(ui, &format!("正在加入白名单…{name}"));
 }
 
 /// 切换「暂停记录」（主菜单与托盘菜单共用）。
@@ -2164,6 +2228,7 @@ unsafe fn show_context_menu(ui: &mut Ui) {
             (ID_MENU_REVEAL, "打开所在文件夹".to_string(), false),
             (ID_MENU_COPY, "复制完整路径".to_string(), false),
             (ID_MENU_PIN, "创建桌面快捷方式".to_string(), false),
+            (ID_MENU_WHITELIST, "加入 memfuse 白名单".to_string(), false),
             (ID_MENU_REMOVE, "从历史中移除".to_string(), true),
             (ID_MENU_PRUNE, "清理失效记录".to_string(), false),
             (ID_MENU_RESCAN, "重新扫描项目".to_string(), false),

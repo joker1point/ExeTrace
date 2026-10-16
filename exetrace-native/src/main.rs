@@ -11,6 +11,7 @@
 //!   exetrace.exe --launch <路径>                         打开应用 / 文件夹
 //!   exetrace.exe --make-shortcut <路径> [--name 名称]    钉到桌面（读回校验）
 //!   exetrace.exe --agent-guide [输出路径]                生成接口说明（默认 <数据目录>\agent-guide.md）
+//!   exetrace.exe --whitelist <名字或 exe 路径>           加入 memfuse 白名单（protect-list.txt）
 
 // 正式产物（release）不弹控制台窗口；debug 保留控制台便于排查。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -19,6 +20,7 @@ mod agent;
 mod appicon;
 mod config;
 mod fghook;
+mod memfuse;
 mod paths;
 mod projects;
 mod resolver;
@@ -77,6 +79,16 @@ fn main() -> ExitCode {
             Some(p) => return cli_launch(p),
             None => {
                 eprintln!("用法: ExeTrace.exe --launch <路径>");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    // CLI：加入 memfuse 白名单（2026-10-16）—— 右键那项同一个动作的脚本入口。
+    if let Some(i) = args.iter().position(|a| a == "--whitelist") {
+        match args.get(i + 1).filter(|s| !s.starts_with("--")) {
+            Some(v) => return cli_whitelist(v),
+            None => {
+                eprintln!("用法: ExeTrace.exe --whitelist <进程名 或 exe 路径>");
                 return ExitCode::from(2);
             }
         }
@@ -267,6 +279,37 @@ fn cli_launch(path: &str) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         let _ = writeln!(std::io::stderr(), "error: 启动失败: {path}");
+        ExitCode::from(1)
+    }
+}
+
+/// CLI：把进程名加进 memfuse 的 `protect-list.txt`（`--whitelist <名字或 exe 路径>`）。
+///
+/// 退出码：0 = 已加入或本来就在名单里 / 1 = 失败（找不到 memfuse、调用失败）/ 2 = 用法错。
+fn cli_whitelist(value: &str) -> ExitCode {
+    use std::io::Write;
+    let name = memfuse::name_from(value);
+    if name.is_empty() {
+        let _ = writeln!(std::io::stderr(), "error: 进程名为空");
+        return ExitCode::from(2);
+    }
+    let Some(script) = memfuse::resolve_script() else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "error: 没找到 memfuse 的 memory-guard.ps1（设 config.json 的 memfuse_script，或环境变量 MEMFUSE_SCRIPT）"
+        );
+        return ExitCode::from(1);
+    };
+    if memfuse::is_listed(&script, &name) {
+        let _ = writeln!(std::io::stdout(), "already: {name}");
+        return ExitCode::SUCCESS;
+    }
+    let (ok, detail) = memfuse::add_to_protect_list(&script, &name);
+    if ok {
+        let _ = writeln!(std::io::stdout(), "added: {name}");
+        ExitCode::SUCCESS
+    } else {
+        let _ = writeln!(std::io::stderr(), "error: 加入失败: {detail}");
         ExitCode::from(1)
     }
 }

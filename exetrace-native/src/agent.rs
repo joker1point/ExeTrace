@@ -127,6 +127,11 @@ pub fn guide_text() -> String {
 `"{exe}" --make-shortcut "<exe 或 文件夹路径>" [--name "名称"]` —— 钉到桌面，创建后读回校验
 （退出码 `0` = 通过；失败细分：`3` 路径解析失败 / `4` 创建失败 / `5` 读回不一致）
 
+`"{exe}" --whitelist "<进程名 或 exe 路径>"` —— 加进 memfuse 的内存白名单
+（`protect-list.txt`，内存紧张时这个应用不会被杀；退出码 `0` = 已加入或本来就在名单里，
+`1` = 失败 / `2` = 用法错。需要本机装了 memfuse：脚本位置解析顺序为环境变量
+`MEMFUSE_SCRIPT` → config.json 的 `memfuse_script` → 两个常见位置）
+
 ## 三、调用注意（Windows，实测行为）
 
 - 本程序是 **GUI 子系统 exe**：PowerShell 里 `& exe ...` **不会等它跑完**

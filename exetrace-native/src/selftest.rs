@@ -196,8 +196,33 @@ pub fn run() -> bool {
         let guide_ok = g.contains("--export")
             && g.contains("--find")
             && g.contains("--launch")
-            && g.contains("--make-shortcut");
+            && g.contains("--make-shortcut")
+            && g.contains("--whitelist");
         report(&mut lines, &mut ok, "agent_guide", guide_ok, &format!("{} 字符", g.chars().count()));
+    }
+
+    // memfuse 联动（右键「加入 memfuse 白名单」，2026-10-16）：名字归一是纯函数，先验；
+    // 脚本探测不到（本机没装 memfuse）按「跳过 = 通过」处理（同 git_available 的先例）。
+    {
+        let n1 = crate::memfuse::name_from(r"C:\Program Files\Tencent\WeMeet\3.45.3.407\XnXExternal.exe");
+        let n2 = crate::memfuse::name_from("XnXExternal.exe");
+        let n3 = crate::memfuse::name_from("  XnXExternal  ");
+        let ok_name = n1 == "XnXExternal" && n2 == "XnXExternal" && n3 == "XnXExternal";
+        report(&mut lines, &mut ok, "whitelist_name", ok_name, &format!("{n1} / {n2} / {n3}"));
+    }
+    match crate::memfuse::resolve_script() {
+        Some(script) => {
+            let text = std::fs::read_to_string(&script).unwrap_or_default();
+            let has_cli = text.contains("-AddProtect");
+            report(
+                &mut lines,
+                &mut ok,
+                "memfuse_bridge",
+                has_cli,
+                &format!("{}（-AddProtect: {has_cli}）", script.display()),
+            );
+        }
+        None => report(&mut lines, &mut ok, "memfuse_bridge", true, "跳过：本机未找到 memfuse 脚本"),
     }
 
     // 运行中判定（列表自动屏蔽运行中应用用）：拿自己的名字去查 → 必须能读出自己在跑的路径

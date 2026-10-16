@@ -28,6 +28,9 @@ pub struct Config {
     pub history_days: i64,
     /// 项目扫描的根目录（空 = 用 projects.rs 的内置默认：Documents / WorkBuddy / Desktop）。
     pub project_roots: Vec<String>,
+    /// memfuse 主脚本路径（右键「加入 memfuse 白名单」用）。空 = 自动探测
+    /// （环境变量 `MEMFUSE_SCRIPT` → 两个常见位置；见 `memfuse.rs`）。
+    pub memfuse_script: String,
     pub mtime: Option<SystemTime>,
 }
 
@@ -38,6 +41,7 @@ impl Default for Config {
             categories: HashMap::new(),
             history_days: 30,
             project_roots: Vec::new(),
+            memfuse_script: String::new(),
             mtime: None,
         }
     }
@@ -89,6 +93,9 @@ fn parse(text: &str) -> Config {
                 }
             }
         }
+    }
+    if let Some(s) = value.get("memfuse_script").and_then(|x| x.as_str()) {
+        cfg.memfuse_script = s.trim().to_string();
     }
     cfg
 }
