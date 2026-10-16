@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 pub const APP_NAME: &str = "ExeTrace";
 pub const APP_TITLE: &str = "ExeTrace — 应用历史定位器";
-pub const APP_VERSION: &str = "1.1.0";
+pub const APP_VERSION: &str = "1.1.1";
 
 pub fn data_dir() -> PathBuf {
     if let Ok(v) = std::env::var("EXETRACE_DATA_DIR") {

@@ -57,6 +57,7 @@
 .\ExeTrace.exe --find <关键词>                                         # 查找应用/项目（stdout JSON；0=有结果 1=无结果）
 .\ExeTrace.exe --launch "<路径>"                                       # 打开应用 / 文件夹
 .\ExeTrace.exe --agent-guide                                          # 生成「交给 Agent」的接口说明
+.\ExeTrace.exe --whitelist "AppName"                                  # 加进 memfuse 白名单（内存紧张时不被杀）
 ```
 
 数据与日志（与 exe 存放位置无关，移动 exe 不丢历史）：
@@ -89,6 +90,7 @@ ExeTrace 把「数据」和「能力」都开了一个机器可读的口子，�
 | 读 | `--find <关键词>` | stdout JSON `count/apps[]/projects[]`；退出码 0=有结果 / 1=无结果 |
 | 做 | `--launch <路径>` | 打开应用或文件夹（0=已启动） |
 | 做 | `--make-shortcut <路径> [--name N]` | 钉到桌面（0=已创建且读回校验） |
+| 做 | `--whitelist <名字或路径>` | 加进 memfuse 白名单 `protect-list.txt`（0=已加入或本来就在名单里） |
 
 > ⚠️ 本程序是 GUI 子系统 exe：PowerShell 里 `& exe ...` **不会等它跑完**（命令立刻返回、文件还没生成）。
 > 请用 `cmd /c` 或 `Start-Process -Wait` 调用，并**以产物文件为准**（stdout 摘要可能晚到）。
@@ -97,8 +99,8 @@ ExeTrace 把「数据」和「能力」都开了一个机器可读的口子，�
 
 | 版本 | 位置 | exe 体积 | 特点 |
 |---|---|---|---|
-| **Python / tkinter（release 版，v3.1）** | 根目录 | 20.4 MB | 功能最全（搜索排序 / 图标 / 托盘 / 一键钉桌面 / 分类 / 使用时长）；常态 CPU ≈ 2%（单核），**后台/最小化内存 5-8 MB** |
-| **Rust / Win32 原生（新，推荐，v1.1.0）** | `exetrace-native/` | **1.72 MB** | 系统原生控件、不含任何 UI 框架：**托盘常驻约 4.5 MB**、窗口打开约 13 MB（2026-10-16 实测）；功能对齐 v3.1，并新增 运行中自动隐藏 / 本机项目管理 /「交给 Agent」接口。**[下载 v1.1.0-native](https://github.com/joker1point/ExeTrace/releases/tag/v1.1.0-native)** · **[功能演示（6 张真机动图）](exetrace-native/docs/feature-demo.md)** |
+| **Python / tkinter（v3.1.0 · 已归档）** | 根目录 | 20.4 MB | 历史实现：2026-10 起停止维护（源码保留、可自行构建）；与 native 版共用同一历史库，数据互通 |
+| **Rust / Win32 原生（新，主力，v1.1.1）** | `exetrace-native/` | **1.73 MB** | 系统原生控件、不含任何 UI 框架：**托盘常驻约 5 MB**、窗口打开约 12 MB（2026-10-16 实测）；功能对齐 v3.1，并新增 运行中自动隐藏 / 本机项目管理 /「交给 Agent」接口。**[下载 v1.1.1-native](https://github.com/joker1point/ExeTrace/releases/tag/v1.1.1-native)** · **[功能演示（6 张真机动图）](exetrace-native/docs/feature-demo.md)** |
 | Rust / egui（实验） | `exetrace-rs/` | 6.8 MB | 冷启动快、体积小；内存偏高（约 120 MB，为 egui 框架基线） |
 
 两个版本共用同一 SQLite 库（`%LOCALAPPDATA%\ExeTrace\history.db`，schema 一致），数据互通；不建议同时常驻（会双重记录）。
