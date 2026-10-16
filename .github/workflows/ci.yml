@@ -1,0 +1,67 @@
+name: ci
+
+# push 到 main（含 PR）自动跑：语法 → 非 GUI 自检 → README 素材规范 → 对外材料红线。
+# Rust 原生版单独一个 job（用 runner 自带工具链），不依赖本机 mingw / 镜像配置。
+#
+# 三条既有的 CI 约定（与 flowwatch / gh-fast-download 一致）：
+#   · Windows runner 默认 stdout 不是 UTF-8 → PYTHONIOENCODING=utf-8（中文输出会直接崩）
+#   · README 素材规范（数量按功能点数 / 形式按复杂度）与红线扫描都是硬闸门
+#     —— 2026-10-16 起 exetrace 已达标（banner + 主界面 + pin 动图，N=10 → 需 ≥3）
+#
+# 想只跑某一步：Actions → ci → Run workflow？此工作流不设手动入口；
+# 本地复跑同款命令即可（见各 step 的 run 行）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  checks:
+    name: "语法 · 自检 · README 素材 · 红线"
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+
+      - name: "语法检查（src + tools）"
+        run: python -m compileall -q src tools
+
+      - name: "非 GUI 自检（--selftest）"
+        run: python src/main.py --selftest
+
+      - name: "CLI 契约（--help）"
+        run: python src/main.py --help
+
+      - name: "README 素材规范（数量按功能点数 / 形式按复杂度）"
+        run: python tools/check_readme_shots.py .
+
+      - name: "对外材料红线（品牌名 / 凭据，硬闸门）"
+        run: python tools/check_public_materials.py
+
+  native:
+    name: "Rust 原生版 cargo check"
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: exetrace-native
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "切到 runner 自带工具链（本机 GNU / mingw / 镜像配置在 CI 不适用，先挪开）"
+        run: |
+          if (Test-Path rust-toolchain.toml) { Move-Item rust-toolchain.toml rust-toolchain.toml.ci-off }
+          if (Test-Path .cargo/config.toml) { Move-Item .cargo/config.toml .cargo/config.toml.ci-off }
+          rustup show active-toolchain
+
+      - name: "cargo check"
+        run: cargo check
