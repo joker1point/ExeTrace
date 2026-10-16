@@ -907,3 +907,168 @@ def make_app_icon_image(size: int = 64):
     dot = s * 0.121
     d.ellipse([c - dot, c - dot, c + dot, c + dot], fill=(255, 255, 255, 255))
     return img
+
+
+# ---------------------------------------------------------------- 桌面图标方位（2026-10-09）
+#
+# 与 Rust 原生版同一套口径：钉完桌面快捷方式要告诉用户"它落在桌面哪个区"。
+# 做法不是"按序号推算"（本机桌面 91 个图标、一屏只放得下 36 个，会滚动也会重排），
+# 而是**快照 diff**：建前读一次全部坐标、建后读一次，多出来的那个就是新图标。
+
+_LVM_GETITEMCOUNT = 0x1004       # LVM_FIRST + 4
+_LVM_GETITEMPOSITION = 0x1010    # LVM_FIRST + 16
+_PROCESS_VM = 0x0008 | 0x0010 | 0x0020   # VM_OPERATION | VM_READ | VM_WRITE
+_MEM_COMMIT, _MEM_RESERVE, _MEM_RELEASE = 0x1000, 0x2000, 0x8000
+_PAGE_READWRITE = 0x04
+_SPI_GETWORKAREA = 0x0030
+_SM_CXSCREEN, _SM_CYSCREEN = 0, 1
+
+
+def _send_timeout(hwnd, msg: int, wparam: int, lparam: int, timeout_ms: int = 800):
+    """SendMessageTimeoutW 包装：Explorer 忙时宁可返回 None，也不要挂住 UI 线程。"""
+    out = ctypes.c_size_t()
+    ok = user32.SendMessageTimeoutW(hwnd, msg, wparam, lparam, 0x0002, timeout_ms,
+                                    ctypes.byref(out))
+    return out.value if ok else None
+
+
+def _desktop_listview() -> int:
+    """桌面图标的 ListView 句柄（宿主可能是 Progman，也可能是 WorkerW）。"""
+    def _child_of(parent: int) -> int:
+        if not parent:
+            return 0
+        dv = user32.FindWindowExW(parent, None, "SHELLDLL_DefView", None)
+        if not dv:
+            return 0
+        return user32.FindWindowExW(dv, None, "SysListView32", None)
+
+    lv = _child_of(user32.FindWindowW("Progman", None))
+    if lv:
+        return lv
+
+    found: list[int] = []
+    wndenumproc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(h, _l):
+        hit = _child_of(h)
+        if hit:
+            found.append(hit)
+            return False
+        return True
+
+    user32.EnumWindows(wndenumproc(_cb), 0)
+    return found[0] if found else 0
+
+
+def desktop_icon_positions() -> list[tuple[int, int]] | None:
+    """桌面图标的**批量屏幕坐标**（物理像素；只读）。
+
+    为什么要跨进程：`LVM_GETITEMPOSITION` 是把坐标**写进一块内存**再取回，
+    所以要在 Explorer 进程里分配 8 字节/项、逐项发消息、一次性读回、最后释放。
+    全程只读，不修改 Explorer 的任何数据。失败一律返回 None（调用方退化为泛化文案）。
+    """
+    if not IS_WINDOWS:
+        return None
+    lv = _desktop_listview()
+    if not lv:
+        return None
+
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(lv, ctypes.byref(pid))
+    if not pid.value:
+        return None
+
+    handle = kernel32.OpenProcess(_PROCESS_VM, False, pid.value)
+    if not handle:
+        return None
+    try:
+        count = _send_timeout(lv, _LVM_GETITEMCOUNT, 0, 0)
+        if count is None:
+            return None
+        if count == 0:
+            return []
+        size = count * 8
+        addr = kernel32.VirtualAllocEx(handle, None, size,
+                                       _MEM_COMMIT | _MEM_RESERVE, _PAGE_READWRITE)
+        if not addr:
+            return None
+        try:
+            for i in range(count):
+                if _send_timeout(lv, _LVM_GETITEMPOSITION, i, addr + i * 8) is None:
+                    return None
+            buf = (ctypes.c_byte * size)()
+            got = ctypes.c_size_t()
+            ok = kernel32.ReadProcessMemory(handle, ctypes.c_void_p(addr), buf, size,
+                                            ctypes.byref(got))
+            if not ok or got.value != size:
+                return None
+            ints = ctypes.cast(buf, ctypes.POINTER(ctypes.c_int * (count * 2))).contents
+            return [(ints[i * 2], ints[i * 2 + 1]) for i in range(count)]
+        finally:
+            kernel32.VirtualFreeEx(handle, ctypes.c_void_p(addr), 0, _MEM_RELEASE)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def icon_area(positions: list[tuple[int, int]]) -> tuple[int, int, int, int]:
+    """所有图标占据的矩形 —— 方位判断的**参照系**。
+
+    为什么不拿屏幕矩形当参照：本进程（tkinter）不是 DPI-aware，`GetSystemMetrics` /
+    `SPI_GETWORKAREA` 给的是**逻辑**值，而图标坐标来自 DPI-aware 的 Explorer（**物理**值）；
+    更坑的是 `GetDpiForSystem` 在非 aware 进程里也只返回 96 → 换算等于没做（实测逻辑
+    1440×852 对物理 2880×1800，差整整一倍，方位会整体偏）。改用"图标自己占的区域"作参照，
+    天然免疫坐标系差异，语义也够用 —— 用户就是在图标堆里找它。
+    """
+    xs = [p[0] for p in positions]
+    ys = [p[1] for p in positions]
+    pad = 120      # 约一个图标格的余量，免得边缘图标被判到"外面"
+    return min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad
+
+
+def zone_of(x: int, y: int, ref_area: tuple[int, int, int, int]) -> str:
+    """**八方位**（3×3 网格去掉中心）。中心格也有说法，不落空。"""
+    left, top, right, bottom = ref_area
+    fx = (x - left) / max(1, right - left)
+    fy = (y - top) / max(1, bottom - top)
+    col = 0 if fx < 1 / 3 else (1 if fx < 2 / 3 else 2)
+    row = 0 if fy < 1 / 3 else (1 if fy < 2 / 3 else 2)
+    return (("左上", "上方", "右上"),
+            ("左侧", "中央", "右侧"),
+            ("左下", "下方", "右下"))[row][col]
+
+
+def new_icon_zone(before: list[tuple[int, int]] | None) -> str | None:
+    """钉完之后再读一次坐标，找出"多出来的那个" → 它在桌面哪个方位。
+
+    必须重试：Explorer 刷新桌面图标列表**有延迟**，快捷方式落盘后立刻读往往还是旧
+    列表（数量没变 → diff 为空 → 只能退化成泛化文案）。4×200ms 实测稳定命中。
+    """
+    for attempt in range(4):
+        if attempt:
+            time.sleep(0.2)
+        after = desktop_icon_positions()
+        if after is None:
+            continue
+        fresh = None
+        if before is not None and len(after) > len(before):
+            old = set(before)
+            for point in after:
+                if point not in old:
+                    fresh = point
+                    break
+        elif before is None and after:      # 建前快照失败：退一步用最后一个
+            fresh = after[-1]
+        if fresh:
+            return zone_of(fresh[0], fresh[1], icon_area(after))
+    return None
+
+
+def play_success_beep() -> None:
+    """系统提示音（标准库 winsound，不引音频资源）；失败静默。"""
+    if not IS_WINDOWS:
+        return
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    except Exception:      # noqa: BLE001 - 提示音失败绝不影响主流程
+        pass

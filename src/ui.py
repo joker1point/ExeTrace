@@ -20,6 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 import paths
 import resolver
 import shortcut
+import toast
 import winutil
 
 log = logging.getLogger("exetrace.ui")
@@ -849,6 +850,8 @@ class AppWindow:
                 "ExeTrace", f"这个文件已经不在原来的位置了：\n\n{path}\n\n无法为它创建快捷方式。"
             )
             return
+        # 建前快照：给"新图标落在桌面哪个方位"留基线（见 winutil.new_icon_zone 的 diff 思路）
+        before = winutil.desktop_icon_positions()
         try:
             desktop = shortcut.desktop_dir()
             os.makedirs(desktop, exist_ok=True)
@@ -877,7 +880,12 @@ class AppWindow:
         self.store.mark_pinned(path)
         self.refresh(force=True)
         suffix = "（已校验）" if verified else ""
-        self._set_event(f"已创建桌面快捷方式：{os.path.basename(lnk_path)}{suffix}")
+        base = os.path.basename(lnk_path)
+        self._set_event(f"已创建桌面快捷方式：{base}{suffix}")
+        # 强反馈：立刻弹卡片 + 一声提示音；方位要等 Explorer 刷新（toast 里异步补文案）
+        winutil.play_success_beep()
+        toast.show(self.root, "已创建桌面快捷方式", f"{base}{suffix}",
+                   zone_getter=lambda: winutil.new_icon_zone(before))
 
     def _pin_any_path(self) -> None:
         """钉任意 exe / 软件文件夹到桌面（不依赖历史记录；能力并入自 DeskPin）。
