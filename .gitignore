@@ -8,9 +8,12 @@ __pycache__/
 # Rust 版（exetrace-rs/）构建产物
 exetrace-rs/target/
 
-# 宣传视频素材（本地工作区，体积大不入库；生成器见 tools/make_video_assets.py）
+# 宣传视频素材（本地工作区，体积大不入库；生成器见 _deploy/_qa/exetrace-promo/）
 video_assets/
 
 # Rust 原生版（exetrace-native/）：构建缓存与录制中间产物
 exetrace-native/target/
 exetrace-native/assets/demo/raw/_frames_*/
+
+# 机器相关的工具链配置（不进库；模板见 .cargo/config.toml.example）
+.cargo/config.toml

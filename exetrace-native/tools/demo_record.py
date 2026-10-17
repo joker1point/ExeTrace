@@ -29,6 +29,7 @@ import atexit
 import ctypes
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -44,7 +45,10 @@ ROOT = Path(__file__).resolve().parent.parent          # exetrace-native/
 EXE = ROOT / "dist" / "ExeTrace.exe"
 RAW_DIR = ROOT / "assets" / "demo" / "raw"
 GIF_DIR = ROOT / "assets" / "demo"
-FFMPEG = r"C:\Users\biren\anaconda3\Library\bin\ffmpeg.exe"
+# ffmpeg 从环境变量 / PATH 取，不写死本机路径
+FFMPEG = os.environ.get("FFMPEG") or shutil.which("ffmpeg") or ""
+if not FFMPEG:
+    sys.exit("找不到 ffmpeg：请装到 PATH，或设环境变量 FFMPEG 指向 ffmpeg.exe")
 
 WINDOW_CLASS = "ExeTraceNativeWnd"
 

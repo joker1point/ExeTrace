@@ -1,0 +1,22 @@
+# 复制本文件为 .cargo/config.toml 再改成你自己的路径（config.toml 不进版本库）：
+#   PowerShell: Copy-Item .cargo\config.toml.example .cargo\config.toml
+#
+# 用 GNU 工具链编译（无 MSVC / Windows SDK 时走 mingw-w64）：
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+# ↓ 改成你的 mingw-w64 bin 目录（msys2 / WinLibs / TDM-GCC 均可）
+linker = 'C:\msys64\mingw64\bin\gcc.exe'
+ar = 'C:\msys64\mingw64\bin\ar.exe'
+
+# crates.io 镜像（可选；能直连 crates.io 时删掉下面三段）
+# 本机 GitHub 直连受限，实测 rsproxy 加速可行
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true

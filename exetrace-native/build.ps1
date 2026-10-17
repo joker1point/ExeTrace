@@ -3,14 +3,24 @@
 # ASCII only: PowerShell 5.1 reads BOM-less files as ANSI and would break on CJK.
 # GNU toolchain notes (see README):
 #   - mingw bin must be FIRST in PATH (old 32-bit dlltool breaks x86-64 import libs)
-#   - .cargo/config.toml pins linker/ar paths for this machine
+#   - .cargo/config.toml pins linker/ar paths for this machine (see config.toml.example)
+#
+# Usage: .\build.ps1 [-MingwBin <path>]
+#   -MingwBin defaults to %USERPROFILE%\mingw64\bin
+
+param(
+    [string]$MingwBin = "$env:USERPROFILE\mingw64\bin"
+)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-$mingw = "C:\Users\biren\mingw64\bin"
-if (Test-Path $mingw) { $env:PATH = "$mingw;$env:PATH" }
+if (Test-Path $MingwBin) {
+    $env:PATH = "$MingwBin;$env:PATH"
+} else {
+    Write-Host "WARN: mingw bin not found: $MingwBin  (pass -MingwBin <path>)"
+}
 
 Write-Host "[1/3] cargo build --release"
 cargo build --release
