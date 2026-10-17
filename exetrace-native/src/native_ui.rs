@@ -269,12 +269,18 @@ fn wanted_size(scale: f32) -> (i32, i32) {
 
 // ------------------------------------------------------------------ 入口
 
+/// `offscreen = true`（`--offscreen`）：窗口放到屏幕外且不激活 —— 供截图 / 演示
+/// 采集用，让正在用电脑的人完全无感（2026-10-17 采集素材纪律）。
 pub fn run(
     store: Arc<Mutex<Store>>,
     last_event: LastEvent,
     minimized: bool,
     tray_enabled: bool,
     paused: Arc<AtomicBool>,
+    offscreen: bool,
+    // 启动时的「视图」索引（0 全部 / 1 应用 / 2 项目 / 3 HTML）——截图 / 演示用，
+    // 省掉运行时切视图那条路径。
+    initial_view: usize,
 ) -> Result<(), String> {
     unsafe {
         // 托盘 icon 与窗口都要正确的 DPI 行为，必须在建窗前设置。
@@ -320,7 +326,7 @@ pub fn run(
             rev: 0,
             sort_idx: 0,
             days: crate::config::current().history_days,
-            view_idx: 0,
+            view_idx: initial_view.min(VIEWS.len() - 1),
             git_result: Arc::new(Mutex::new(None)),
             memfuse_result: Arc::new(Mutex::new(None)),
             himl: 0,
@@ -431,7 +437,26 @@ pub fn run(
             rc_after.bottom - rc_after.top
         );
 
-        if minimized {
+        if offscreen {
+            // 屏幕外 + 不激活：内容照常绘制（PrintWindow 能抓到），人看不到也抢不到焦点。
+            let moved = SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                -32000,
+                -32000,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let mut rc_os: RECT = std::mem::zeroed();
+            GetWindowRect(hwnd, &mut rc_os);
+            log::info!(
+                "offscreen: moved={moved} rect=({}, {})-({}, {})",
+                rc_os.left, rc_os.top, rc_os.right, rc_os.bottom
+            );
+            ShowWindow(hwnd, 4 /* SW_SHOWNOACTIVATE */);
+            UpdateWindow(hwnd);
+        } else if minimized {
             ShowWindow(hwnd, SW_HIDE);
         } else {
             ShowWindow(hwnd, SW_SHOW);
@@ -916,7 +941,7 @@ unsafe fn create_children(ui: &mut Ui, hinst: windows_sys::Win32::Foundation::HI
         let l = winx::wide(label);
         SendMessageW(ui.view_box, CB_ADDSTRING, 0, l.as_ptr() as LPARAM);
     }
-    SendMessageW(ui.view_box, CB_SETCURSEL, 0, 0);
+    SendMessageW(ui.view_box, CB_SETCURSEL, ui.view_idx as usize, 0);
 
     // 「近 N 天」过滤：只显示最近 N 天内打开过的记录（0 = 全部）。
     // 样式用字面量：windows-sys 未导出全部 ES_*/SS_* 常量（ES_CENTER=0x0001 / ES_NUMBER=0x2000 / SS_CENTERIMAGE=0x0200）。

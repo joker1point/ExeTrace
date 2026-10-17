@@ -39,6 +39,22 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let minimized = args.iter().any(|a| a == "--minimized");
     let no_tray = args.iter().any(|a| a == "--no-tray");
+    // 屏幕外 + 不激活：给截图 / 演示采集用（用户无感）
+    let offscreen = args.iter().any(|a| a == "--offscreen");
+    // 跳过冷启动回填：让隔离库里只有调用方放进去的数据
+    let no_scan = args.iter().any(|a| a == "--no-scan");
+    // --view all|app|project|html：启动即定位到某个视图（截图 / 演示 / 快捷方式用）
+    let initial_view = args
+        .iter()
+        .position(|a| a == "--view")
+        .and_then(|i| args.get(i + 1))
+        .map(|v| match v.to_ascii_lowercase().as_str() {
+            "app" | "应用" => 1usize,
+            "project" | "项目" => 2,
+            "html" | "网页" => 3,
+            _ => 0,
+        })
+        .unwrap_or(0);
 
     if args.iter().any(|a| a == "--selftest") {
         return if selftest::run() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
@@ -118,24 +134,28 @@ fn main() -> ExitCode {
         }
     };
 
-    // 冷启动扫描（后台线程）：注册表历史
-    {
-        let st = store.clone();
-        std::thread::spawn(move || {
-            if let Ok(mut s) = st.lock() {
-                scanner::scan_all(&mut s);
-            }
-        });
-    }
+    // `--no-scan`：跳过两轮冷启动扫描。演示 / 截图 / 回归用 —— 保证库里只有
+    // 调用方预先放进去的数据，不会把本机真实使用痕迹灌进隔离库（2026-10-17）。
+    if !no_scan {
+        // 冷启动扫描（后台线程）：注册表历史
+        {
+            let st = store.clone();
+            std::thread::spawn(move || {
+                if let Ok(mut s) = st.lock() {
+                    scanner::scan_all(&mut s);
+                }
+            });
+        }
 
-    // 冷启动扫描（后台线程）：本机 git 项目（2026-10-15，「管理项目入口」的地基）
-    {
-        let st = store.clone();
-        std::thread::spawn(move || {
-            if let Ok(mut s) = st.lock() {
-                projects::scan_all(&mut s);
-            }
-        });
+        // 冷启动扫描（后台线程）：本机 git 项目（2026-10-15，「管理项目入口」的地基）
+        {
+            let st = store.clone();
+            std::thread::spawn(move || {
+                if let Ok(mut s) = st.lock() {
+                    projects::scan_all(&mut s);
+                }
+            });
+        }
     }
 
     // 实时监控（把"刚刚记录"的事件投给 UI 做提示）
@@ -150,7 +170,15 @@ fn main() -> ExitCode {
         }
     });
 
-    let code = match native_ui::run(store.clone(), last_event, minimized, !no_tray, paused.clone()) {
+    let code = match native_ui::run(
+        store.clone(),
+        last_event,
+        minimized,
+        !no_tray,
+        paused.clone(),
+        offscreen,
+        initial_view,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             log::error!("GUI 退出异常: {e}");

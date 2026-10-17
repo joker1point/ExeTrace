@@ -350,9 +350,19 @@ pub fn message_box_on(parent: HWND, text: &str) {
 
 // ---------------------------------------------------------------- 单实例
 
+/// 数据目录隔离时用**独立**互斥体：让「隔离实例」（截图 / 演示 / 多套数据）能与
+/// 用户正在用的实例并存，不打断他手上的事（2026-10-17 采集素材纪律）。
+/// 不设 `EXETRACE_DATA_DIR` 时仍用原来的名字 —— 保持与 Python 版 / egui 版
+/// 「三个版本不能同时运行」的既有约定。
 pub fn acquire_single_instance() -> Option<HANDLE> {
     unsafe {
-        let name = wide("Local\\ExeTrace_SingleInstance_9F3C");
+        let name_str = match std::env::var("EXETRACE_DATA_DIR") {
+            Ok(v) if !v.trim().is_empty() => {
+                format!("Local\\ExeTrace_SingleInstance_9F3C_{:016X}", fnv1a(v.trim()))
+            }
+            _ => "Local\\ExeTrace_SingleInstance_9F3C".to_string(),
+        };
+        let name = wide(&name_str);
         let h = windows_sys::Win32::System::Threading::CreateMutexW(
             std::ptr::null_mut(),
             0,
@@ -367,6 +377,16 @@ pub fn acquire_single_instance() -> Option<HANDLE> {
         }
         Some(h)
     }
+}
+
+/// FNV-1a 64：只用来把数据目录折成一个稳定的后缀（不用于安全）。
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h
 }
 
 // ---------------------------------------------------------------- 开机自启
