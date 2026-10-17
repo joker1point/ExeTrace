@@ -165,7 +165,10 @@ pub fn run() -> bool {
                 &mut ok,
                 "registry_scan",
                 stats.total > 0,
-                &format!("收录 {} 个应用（feature_usage={} muicache={}）", stats.total, stats.feature_usage, stats.muicache),
+                &format!(
+                    "收录 {} 个应用 + {} 个网页（feature_usage={} muicache={}）",
+                    stats.total, stats.recent_html, stats.feature_usage, stats.muicache
+                ),
             );
         }
         Err(e) => report(&mut lines, &mut ok, "registry_scan", false, &format!("{e}")),

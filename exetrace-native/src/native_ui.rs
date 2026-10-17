@@ -102,8 +102,9 @@ const HELP_TEXT: &str = "ExeTrace —— 应用历史定位器\n\n\
 后台记录你打开过的每一个应用，关掉软件界面后随时能在这里找回它。\n\
 正在运行的应用会自动隐藏（它们不需要「找回」，关掉后即恢复显示）。\n\
 首次启动会扫描系统里的历史痕迹，所以不用等下一次打开就有记录。\n\
-本机散落的 git 项目会被扫描成条目（顶部「视图」可切 全部 / 应用 / 项目）；\n\
-项目行：双击打开文件夹，右键可打开主页 / 更新（git pull）。\n\n\
+本机散落的 git 项目会被扫描成条目（顶部「视图」可切 全部 / 应用 / 项目 / HTML）；\n\
+项目行：双击打开文件夹，右键可打开主页 / 更新（git pull）。\n\
+HTML 行：浏览器打开过的本地网页（双击用默认浏览器再打开）。\n\n\
 【常用操作】\n\
   双击列表项                启动该应用（项目 = 打开文件夹）\n\
   右键列表项                启动 / 打开所在文件夹 / 复制路径 / 创建桌面快捷方式 /\n\
@@ -146,10 +147,11 @@ const SORTS: [(&str, &str); 4] = [
 ];
 
 /// 「视图」下拉选项：索引 ↔ query 的 view 参数（见 `view_key`）。
-const VIEWS: [&str; 3] = ["全部", "应用", "项目"];
+/// 2026-10-17 加「HTML」—— 浏览器打开过的本地网页（`source='html'`）。
+const VIEWS: [&str; 4] = ["全部", "应用", "项目", "HTML"];
 
 fn view_key(idx: usize) -> &'static str {
-    ["all", "app", "project"][idx.min(2)]
+    ["all", "app", "project", "html"][idx.min(3)]
 }
 
 /// 列定义：标题 / 初始宽度（96dpi）/ 对齐（对齐 Python v3.1 的 7 列）。
@@ -236,6 +238,8 @@ struct Ui {
     toast_at: f64,
     total: i64,
     projects: i64,
+    /// 已收录的本地网页数（`source='html'`，2026-10-17）。
+    html: i64,
     today: i64,
     /// 「已在运行的应用自动屏蔽」判定数据：`run_stems` 是参与判定的应用名集合
     /// （tick 复核必须与 refresh 同基准，否则集合比较永远不等、每次白刷列表）；
@@ -342,6 +346,7 @@ pub fn run(
             toast_at: 0.0,
             total: 0,
             projects: 0,
+            html: 0,
             today: 0,
             run_stems: std::collections::HashSet::new(),
             run_paths: std::collections::HashSet::new(),
@@ -890,7 +895,8 @@ unsafe fn create_children(ui: &mut Ui, hinst: windows_sys::Win32::Foundation::HI
     }
     SendMessageW(ui.sort_box, CB_SETCURSEL, 0, 0);
 
-    // 「视图」下拉：全部 / 应用 / 项目（项目 = 本机 git 仓库扫描结果，2026-10-15）
+    // 「视图」下拉：全部 / 应用 / 项目 / HTML
+    // （项目 = 本机 git 仓库扫描，2026-10-15；HTML = 浏览器打开过的本地网页，2026-10-17）
     ui.view_box = CreateWindowExW(
         0,
         WC_COMBOBOX,
@@ -1280,8 +1286,12 @@ unsafe fn relayout_for_dpi(ui: &mut Ui) {
 
 // ------------------------------------------------------------------ 数据刷新
 
-/// 分类列文案：项目行显示档位（项目·自有 / 项目·克隆 / 项目·本地）；应用行走既有分类。
+/// 分类列文案：项目行显示档位（项目·自有 / 项目·克隆 / 项目·本地）；
+/// 网页行显示「网页」；应用行走既有分类。
 fn row_category(cfg: &crate::config::Config, r: &AppRow) -> String {
+    if r.source == "html" {
+        return "网页".to_string();
+    }
     if r.source == "project" {
         let tier = match r.origin.as_str() {
             "own" => "自有",
@@ -1299,11 +1309,12 @@ unsafe fn refresh(ui: &mut Ui, reset_icons: bool) {
     let sort = SORTS[ui.sort_idx.min(SORTS.len() - 1)].1;
     let days = ui.days;
     let view = view_key(ui.view_idx);
-    let (rows, total, projects, today, rev) = match ui.store.lock() {
+    let (rows, total, projects, html, today, rev) = match ui.store.lock() {
         Ok(st) => (
             st.query(&keyword, sort, 2000, days, view).unwrap_or_default(),
             st.total(),
             st.total_projects(),
+            st.total_html(),
             st.count_today(),
             st.rev(),
         ),
@@ -1332,6 +1343,7 @@ unsafe fn refresh(ui: &mut Ui, reset_icons: bool) {
     ui.rows = rows;
     ui.total = total;
     ui.projects = projects;
+    ui.html = html;
     ui.today = today;
     ui.rev = rev;
 
@@ -2346,11 +2358,18 @@ unsafe fn update_status(ui: &mut Ui) {
     } else {
         String::new()
     };
+    // 网页数只在真的有记录时才显示，避免「0 个网页」占位置。
+    let html_part = if ui.html > 0 {
+        format!(" / {} 个网页", ui.html)
+    } else {
+        String::new()
+    };
     let right = if ui.days > 0 {
         format!(
-            "已收录 {} 个应用 / {} 个项目 · 近 {} 天 {} 条{} · 今日打开 {}",
+            "已收录 {} 个应用 / {} 个项目{} · 近 {} 天 {} 条{} · 今日打开 {}",
             ui.total,
             ui.projects,
+            html_part,
             ui.days,
             ui.rows.len(),
             hidden_note,
@@ -2358,8 +2377,8 @@ unsafe fn update_status(ui: &mut Ui) {
         )
     } else {
         format!(
-            "已收录 {} 个应用 / {} 个项目{} · 今日打开 {}",
-            ui.total, ui.projects, hidden_note, ui.today
+            "已收录 {} 个应用 / {} 个项目{}{} · 今日打开 {}",
+            ui.total, ui.projects, html_part, hidden_note, ui.today
         )
     };
     set_status_text(ui.status, 0, &left);

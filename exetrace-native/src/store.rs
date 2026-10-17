@@ -173,6 +173,26 @@ impl Store {
         Ok(())
     }
 
+    /// HTML 打开历史的种子记录（`source='html'`）：只更新元数据，不动首次时间。
+    /// 数据源 = Windows「最近使用的项目」里的 .lnk（见 `scanner::scan_recent_html`）。
+    pub fn upsert_html(
+        &mut self,
+        path: &str,
+        name: &str,
+        last_seen: Option<f64>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO apps(path, name, launch_count, first_seen, last_seen, source)
+             VALUES(?1, ?2, 0, ?3, ?3, 'html')
+             ON CONFLICT(path) DO UPDATE SET
+                 name      = excluded.name,
+                 last_seen = MAX(COALESCE(last_seen, 0), COALESCE(excluded.last_seen, 0)),
+                 source    = CASE WHEN apps.source IN ('watch', 'html') THEN apps.source ELSE 'html' END",
+            params![path, name, last_seen],
+        )?;
+        Ok(())
+    }
+
     /// 批量写入后手动标脏一次（避免逐行 bump 造成扫描期间 UI 反复重建）。
     pub fn mark_changed(&mut self) {
         self.bump();
@@ -210,9 +230,10 @@ impl Store {
         Ok(removed)
     }
 
-    /// `view`：`all` / `app` / `project`（项目 = `source='project'` 的行）。
-    /// `days > 0` 时**应用行**只保留「最后打开时间在最近 days 天内」的（无时间戳的注册表
-    /// 回填会被过滤）；**项目行不受 days 过滤** —— 仓库多久没动都该能被找到。
+    /// `view`：`all` / `app` / `project`（项目 = `source='project'`）/ `html`
+    /// （浏览器打开过的本地网页，`source='html'`；2026-10-17）。
+    /// `days > 0` 时**应用行与网页行**只保留「最后打开时间在最近 days 天内」的（无时间戳的
+    /// 注册表回填会被过滤）；**项目行不受 days 过滤** —— 仓库多久没动都该能被找到。
     pub fn query(
         &self,
         keyword: &str,
@@ -266,7 +287,8 @@ impl Store {
                AND (?4 = 0 OR source = 'project' OR (last_seen IS NOT NULL AND last_seen >= ?5))
                AND (?6 = 'all'
                     OR (?6 = 'project' AND source = 'project')
-                    OR (?6 = 'app' AND source != 'project'))
+                    OR (?6 = 'app' AND source NOT IN ('project', 'html'))
+                    OR (?6 = 'html' AND source = 'html'))
              {order} LIMIT ?3"
         );
         let like = format!(
@@ -334,10 +356,14 @@ impl Store {
         Ok(())
     }
 
-    /// 「已收录」应用数（不含项目行；项目单独统计）。
+    /// 「已收录」应用数（不含项目行与网页行；两者单独统计）。
     pub fn total(&self) -> i64 {
         self.conn
-            .query_row("SELECT COUNT(*) FROM apps WHERE source != 'project'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM apps WHERE source NOT IN ('project', 'html')",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0)
     }
 
@@ -345,6 +371,13 @@ impl Store {
     pub fn total_projects(&self) -> i64 {
         self.conn
             .query_row("SELECT COUNT(*) FROM apps WHERE source = 'project'", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// 已收录的本地网页数（浏览器打开过、被「最近使用的项目」记录）。2026-10-17。
+    pub fn total_html(&self) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM apps WHERE source = 'html'", [], |r| r.get(0))
             .unwrap_or(0)
     }
 

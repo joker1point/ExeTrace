@@ -2,7 +2,7 @@
 
 > **[→ 功能演示：6 张真实操作动图（搜索 / 右键菜单 / 一键钉桌面 / 启动 / 托盘热键 / 帮助）](docs/feature-demo.md)**
 >
-> **[⬇ 下载单文件版（ExeTrace-native-1.1.1-win64.exe，1.73 MB，双击即用）](https://github.com/joker1point/ExeTrace/releases/tag/v1.1.1-native)**
+> **[⬇ 下载单文件版（ExeTrace-native-win64.exe，约 1.7 MB，双击即用）](https://github.com/joker1point/ExeTrace/releases/latest)**
 
 用系统自带的原生控件（`SysListView32` / `Edit` / 菜单 / 托盘）重写的 ExeTrace——把「体积与内存」这条线做到头：**没有 UI 框架，没有 GPU 上下文，托盘常驻 ≈5 MB。**
 
@@ -30,6 +30,7 @@
 - 托盘常驻 + 全局热键 `Ctrl+Alt+E` 呼出 + 开机自启（可开关）
 - 缩托盘/隐藏时主动回收工作集（上面那张表里 ≈5 MB 的来源）
 - **运行中自动隐藏**（2026-10）：正在运行的应用不占列表 ——「找回」只服务"还没找到"的；应用开/关后 ≤3 秒进出列表（判定=进程在跑，按 exe 路径确认，读不出路径按同名兜底）
+- **HTML 打开历史**（2026-10-17，v1.2.0）：浏览器打开过的本地 `.html / .htm / .xhtml` 也进同一列表，「视图」切到 **HTML** 即可只看网页；双击用默认浏览器再打开。数据源是 Windows 自带的「最近使用的项目」目录（`%APPDATA%\Microsoft\Windows\Recent` 的 `.lnk`），**不需要额外权限、不劫持浏览器**；目标文件已删除的条目不收录
 - **本机项目管理**（2026-10）：自动扫描本机 git 仓库进同一列表（顶部「视图」切 全部 / 应用 / 项目；按「自有 / 克隆 / 本地」分档）。项目行：双击打开文件夹 · 钉到桌面 · 打开 GitHub 页 · 一键更新（`git pull --ff-only`）；扫描根目录用 `config.json` 的 `project_roots` 配置，`--export` 可导出 JSON
 - **「交给 Agent」接口**（2026-10-16）：`--export`（全量 JSON：apps + projects）· `--find <词>`（stdout JSON，退出码 0=有结果 1=无结果）· `--launch <路径>` · `--whitelist <名字或 exe 路径>`（加进 memfuse 白名单）· `--agent-guide`（生成随本机路径的接口说明——整段转发给任意 Agent，它即可读数据、调能力）
 - **memfuse 联动：右键加入白名单**（2026-10-16）：内存紧张时应用可能**一开就被 memfuse 杀掉**，来不及打开它的白名单界面 —— 在这里右键「加入 memfuse 白名单」即可（调 memfuse 自己的 `-AddProtect`：幂等、去重、保留注释、立即生效，因为守护每 5 秒重读名单）。脚本位置自动探测（环境变量 `MEMFUSE_SCRIPT` → `config.json` 的 `memfuse_script` → 两个常见位置）

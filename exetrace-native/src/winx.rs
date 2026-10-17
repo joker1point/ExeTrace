@@ -427,6 +427,30 @@ pub fn desktop_dir() -> String {
     format!("{home}\\Desktop")
 }
 
+/// Windows「最近使用的项目」目录（`%APPDATA%\Microsoft\Windows\Recent`）。
+/// 每个被打开过的文件在那里留一个 `.lnk`，读 lnk 即得完整路径 ——
+/// HTML 打开历史记录的数据源（2026-10-17）。
+pub fn recent_dir() -> String {
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Recent, SHGetKnownFolderPath};
+    unsafe {
+        let mut ptr: *mut u16 = std::ptr::null_mut();
+        let hr = SHGetKnownFolderPath(&FOLDERID_Recent, 0, std::ptr::null_mut(), &mut ptr);
+        if hr >= 0 && !ptr.is_null() {
+            let mut len = 0usize;
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            windows_sys::Win32::System::Com::CoTaskMemFree(ptr as *const std::ffi::c_void);
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    format!("{appdata}\\Microsoft\\Windows\\Recent")
+}
+
 // ---------------------------------------------------------------- 桌面图标方位（2026-10-09）
 
 // ListView 消息（winx 没引 Controls 模块，这里直接给数值：LVM_FIRST = 0x1000）。

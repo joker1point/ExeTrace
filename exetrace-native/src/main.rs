@@ -6,7 +6,7 @@
 //!   exetrace.exe --selftest   非 GUI 自检（报告落盘）
 //!
 //! 「交给 Agent」接口（2026-10-16，实现见 `agent.rs`）：
-//!   exetrace.exe --export [输出路径]                     全量数据 JSON（apps + projects，schema v2）
+//!   exetrace.exe --export [输出路径]                     全量数据 JSON（apps + projects + htmls，schema v2）
 //!   exetrace.exe --find <关键词>                         查找（stdout JSON；0=有结果 1=无结果 2=出错）
 //!   exetrace.exe --launch <路径>                         打开应用 / 文件夹
 //!   exetrace.exe --make-shortcut <路径> [--name 名称]    钉到桌面（读回校验）

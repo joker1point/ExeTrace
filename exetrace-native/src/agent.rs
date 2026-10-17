@@ -31,8 +31,9 @@ fn row_json(r: &AppRow) -> serde_json::Value {
     })
 }
 
-/// 全量导出：`apps[]` 与 `projects[]` 分开（schema v2 —— v1 的单列表混放项目，
-/// Agent 还得自己按 source 分流，拆开后「我的项目有哪些」是一次过滤的事）。
+/// 全量导出：`apps[]` / `projects[]` / `htmls[]` 分开（schema v2 —— v1 的单列表混放项目，
+/// Agent 还得自己按 source 分流，拆开后「我的项目有哪些」是一次过滤的事；
+/// `htmls[]` 是 2026-10-17 新增的**向后兼容加字段**，旧消费方忽略即可）。
 pub fn export_doc(st: &Store) -> serde_json::Value {
     let apps: Vec<serde_json::Value> = st
         .query("", "name", 100_000, 0, "app")
@@ -46,30 +47,43 @@ pub fn export_doc(st: &Store) -> serde_json::Value {
         .iter()
         .map(row_json)
         .collect();
+    let htmls: Vec<serde_json::Value> = st
+        .query("", "name", 100_000, 0, "html")
+        .unwrap_or_default()
+        .iter()
+        .map(row_json)
+        .collect();
     serde_json::json!({
         "schema": EXPORT_SCHEMA,
         "schemaVersion": EXPORT_SCHEMA_VERSION,
         "app": paths::APP_NAME,
         "appVersion": paths::APP_VERSION,
         "exportedAt": crate::store::unix_now(),
-        "counts": { "apps": apps.len(), "projects": projects.len() },
+        "counts": { "apps": apps.len(), "projects": projects.len(), "htmls": htmls.len() },
         "apps": apps,
         "projects": projects,
+        "htmls": htmls,
     })
 }
 
-/// 关键词查找（应用 + 项目一起找；按常用度 smart 排序，最多 `limit` 条）。
+/// 关键词查找（应用 + 项目 + 网页一起找；按常用度 smart 排序，最多 `limit` 条）。
 pub fn find_doc(st: &Store, keyword: &str, limit: i64) -> serde_json::Value {
     let rows = st.query(keyword, "smart", limit, 0, "all").unwrap_or_default();
-    let apps: Vec<serde_json::Value> = rows.iter().filter(|r| r.source != "project").map(row_json).collect();
+    let apps: Vec<serde_json::Value> = rows
+        .iter()
+        .filter(|r| r.source != "project" && r.source != "html")
+        .map(row_json)
+        .collect();
     let projects: Vec<serde_json::Value> = rows.iter().filter(|r| r.source == "project").map(row_json).collect();
+    let htmls: Vec<serde_json::Value> = rows.iter().filter(|r| r.source == "html").map(row_json).collect();
     serde_json::json!({
         "schema": FIND_SCHEMA,
         "schemaVersion": 1,
         "query": keyword,
-        "count": apps.len() + projects.len(),
+        "count": apps.len() + projects.len() + htmls.len(),
         "apps": apps,
         "projects": projects,
+        "htmls": htmls,
     })
 }
 
@@ -101,23 +115,24 @@ pub fn guide_text() -> String {
 
 ## 一、数据（读）
 
-1. **全量导出**（应用 + 本机 git 项目）：
+1. **全量导出**（应用 + 本机 git 项目 + 打开过的本地网页）：
 
    `"{exe}" --export "{export}"`
 
-   - JSON，schema `exetrace.export` v2：`apps[]` = 应用、`projects[]` = 项目；
-     `counts` 是两边条数
+   - JSON，schema `exetrace.export` v2：`apps[]` = 应用、`projects[]` = 项目、
+     `htmls[]` = 浏览器打开过的本地网页（2026-10-17 新增，旧消费方忽略即可）；
+     `counts` 是三边条数
    - 每行字段：`name` 名称 · `path` 完整路径 · `source`（`scan`=注册表历史回填 /
-     `launch`=实时记录 / `project`=本机 git 项目）· `origin`（项目档位 `own`=自有 /
-     `clone`=克隆 / `local`=本地；应用为空）· `launchCount` 打开次数 ·
-     `firstSeen`/`lastSeen` Unix 秒（可为 null）· `pinned` 是否已钉桌面 ·
+     `watch`=实时记录 / `project`=本机 git 项目 / `html`=本地网页）· `origin`
+     （项目档位 `own`=自有 / `clone`=克隆 / `local`=本地；其余为空）· `launchCount`
+     打开次数 · `firstSeen`/`lastSeen` Unix 秒（可为 null）· `pinned` 是否已钉桌面 ·
      `totalSeconds` 累计前台使用时长
 2. **关键词查找**（不想拉全量时用）：
 
    `"{exe}" --find <关键词>`
 
-   - 结果打在 stdout（JSON，`exetrace.find` v1）：`count` / `apps[]` / `projects[]`，
-     按常用度排序，最多 20 条
+   - 结果打在 stdout（JSON，`exetrace.find` v1）：`count` / `apps[]` / `projects[]` /
+     `htmls[]`，按常用度排序，最多 20 条
    - 退出码：`0` = 有结果，`1` = 无结果，`2` = 出错
 
 ## 二、能力（做）
