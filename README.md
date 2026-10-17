@@ -15,7 +15,7 @@
 <p align="center">
   <img src="docs/screenshots/exetrace-main.png" width="780"
        alt="ExeTrace 主界面：应用历史列表（应用 / 位置 / 分类 / 打开次数 / 使用时长），底部是「创建桌面快捷方式」「钉任意程序…」等操作"><br>
-  <sub>界面截图（列表为示例记录）：选中历史里的任意一项即可一键钉到桌面；不在历史里的程序用底部「钉任意程序…」直接选 exe 或软件文件夹。</sub>
+  <sub>界面截图（列表为示例记录）：选中历史里的任意一项即可一键钉到桌面；不在历史里【=
 </p>
 
 <p align="center">
@@ -38,6 +38,8 @@
 | 常驻托盘 | 关闭窗口后继续记录；开机自启是可选开关（默认关闭） |
 | **运行中自动隐藏**（原生版，2026-10） | 「找回」只服务"还没找到"的：正在运行的应用自动从列表（含搜索）隐藏，关掉 ≤3 秒自动恢复；状态栏标出已隐藏数量 |
 | **本机项目管理**（原生版，2026-10） | 自动扫描本机 git 仓库收进同一列表：顶部「视图」切 全部 / 应用 / 项目，按「自有 / 克隆 / 本地」分档；项目行支持 双击开文件夹 / 钉桌面（文件夹快捷方式）/ 打开 GitHub 页 / 一键更新（`git pull --ff-only`）；扫描根目录可在 `config.json` 配 `project_roots`，`--export` 导出 JSON |
+| **加入 memfuse 白名单**（原生版，2026-10） | 右键任意应用 → 直接写进 [memfuse](https://github.com/joker1point/memfuse) 的保护名单（走它自己的 `-AddProtect`：幂等 / 去重 / 保留注释 / 先写 `.bak`），内存紧张时它不会被杀；CLI：`ExeTrace.exe --whitelist "<名字或 exe 路径>"`。脚本位置自动探测，也可用 `config.json` 的 `memfuse_script` 或环境变量 `MEMFUSE_SCRIPT` 指定 |
+| **交给 Agent 的接口**（原生版，2026-10） | `--export` 全量 JSON（应用 + 项目，schema v2）/ `--find <关键词>`（stdout JSON，退出码 0=有结果 1=无结果）/ `--launch` 打开 / `--make-shortcut` 钉桌面 / `--agent-guide` 生成**随本机路径**的接口说明——整段转发给任意 AI Agent 即可。见下方《把 ExeTrace 交给你的 Agent》 |
 
 ## 使用
 
@@ -104,6 +106,18 @@ ExeTrace 把「数据」和「能力」都开了一个机器可读的口子，�
 | Rust / egui（实验） | `exetrace-rs/` | 6.8 MB | 冷启动快、体积小；内存偏高（约 120 MB，为 egui 框架基线） |
 
 两个版本共用同一 SQLite 库（`%LOCALAPPDATA%\ExeTrace\history.db`，schema 一致），数据互通；不建议同时常驻（会双重记录）。
+
+<p align="center">
+  <img src="exetrace-native/docs/screenshots/projects-view.png" width="820"
+       alt="原生版「项目」视图：自动扫描的本机 git 仓库收进同一张列表，按自有 / 克隆 / 本地分档"><br>
+  <sub>原生版「项目」视图（真实界面）：散落在各个工作目录的本机 git 仓库收进同一张列表，按「自有 / 克隆 / 本地」分档；双击开文件夹，右键可钉桌面 / 打开 GitHub 页 / 一键更新。</sub>
+</p>
+
+<p align="center">
+  <img src="exetrace-native/assets/demo/2-context-menu.gif" width="820"
+       alt="原生版真机操作录制：右键菜单（打开所在文件夹 / 创建桌面快捷方式 / 加入 memfuse 白名单）"><br>
+  <sub>原生版真机操作录制：右键任意一条记录即可操作；「加入 memfuse 白名单」也在这一层（原生版共 6 张操作动图，见<a href="exetrace-native/docs/feature-demo.md">功能演示</a>）。</sub>
+</p>
 
 ## 从源码构建
 
