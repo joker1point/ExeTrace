@@ -114,6 +114,12 @@ fn main() -> ExitCode {
     }
 
     init_logging();
+    // panic 也落日志：release 是 GUI 子系统、没有控制台，线程 panic 会**静默消失**
+    // （2026-10-18 实测：watcher 线程挂掉后进程还在、窗口还能响应，但不再记录任何东西，
+    // 日志里连一行异常都没有）。装个钩子至少能留下现场。
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("PANIC: {info}");
+    }));
     log::info!("启动 {} {} (pid={})", paths::APP_NAME, paths::APP_VERSION, std::process::id());
 
     if winx::acquire_single_instance().is_none() {
